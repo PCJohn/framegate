@@ -10,7 +10,7 @@ All tunables live in one immutable dataclass -- the single source of truth. Buil
 
 There is no shipped YAML to drift from the dataclass: ``from_yaml()`` with no path just
 uses the defaults, and ``to_yaml()`` generates a template from the live fields on demand
-(``python -m framegate.config`` prints one).
+(``python -m framegate`` prints one).
 """
 
 from dataclasses import dataclass, fields, replace

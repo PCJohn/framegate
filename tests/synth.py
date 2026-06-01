@@ -31,6 +31,54 @@ def black(size=THUMB):
     return np.zeros((size, size, 3), np.uint8)
 
 
+def white(size=THUMB):
+    return np.full((size, size, 3), 255, np.uint8)
+
+
+def solid(value, size=THUMB):
+    """A uniform BGR frame (value may be an int or a (B,G,R) triple)."""
+    return np.full((size, size, 3), value, np.uint8)
+
+
+def noise(size=THUMB, seed=0):
+    """Full-range random colour noise (high detail, not blank)."""
+    return np.random.default_rng(seed).integers(0, 256, (size, size, 3), dtype=np.uint8)
+
+
+def gradient(size=THUMB, axis=1):
+    """A smooth luminance ramp (coarse structure, little fine texture)."""
+    ramp = np.linspace(0, 255, size, dtype=np.float32)
+    g = np.tile(ramp, (size, 1)) if axis == 1 else np.tile(ramp[:, None], (1, size))
+    return cv2.cvtColor(g.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+
+def checkerboard(size=THUMB, cell=8):
+    """A black/white checkerboard (strong fine texture, achromatic)."""
+    yy, xx = np.mgrid[0:size, 0:size]
+    g = (((yy // cell) + (xx // cell)) % 2 * 255).astype(np.uint8)
+    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
+
+
+def stripes(size=THUMB, period=4, horizontal=True):
+    """Fine achromatic line pattern (text-like high-frequency horizontal texture)."""
+    idx = (np.arange(size) // (period // 2)) % 2 * 255
+    g = np.tile(idx, (size, 1)) if horizontal else np.tile(idx[:, None], (1, size))
+    return cv2.cvtColor(g.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+
+
+def moving_block(x, size=THUMB, w=None, bg=30, fg=220):
+    """A bright block on a dark field, left edge at column `x` (for motion tests)."""
+    w = w or size // 3
+    f = np.full((size, size, 3), bg, np.uint8)
+    f[size // 3: 2 * size // 3, x: x + w] = fg
+    return f
+
+
+def fade_ramp(scene, factors):
+    """A list of frames dimming/brightening `scene` by each factor in turn."""
+    return [noisy(dim(scene, f)) for f in factors]
+
+
 def grayscale_scene(vseed, size=THUMB):
     r = np.random.default_rng(vseed)
     return np.clip(r.random((size, size)) * 120 + 80, 0, 255).astype(np.uint8)

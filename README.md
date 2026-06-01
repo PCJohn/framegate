@@ -6,7 +6,7 @@ or video frame to get cheap, broadly-useful signals, then let a heavy model
 
 It is deliberately *generic*: no task-specific heuristics, no per-dataset tuning.
 Everything is derived from cheap per-cell colour/luma statistics computed on a small
-thumbnail, so a single call costs ~1-2 ms on a 1080p frame.
+thumbnail, so a single call costs roughly 0.5-2 ms on a 1080p frame (hardware-dependent).
 
 ```python
 from framegate import Gate
@@ -224,20 +224,29 @@ inert on high-motion frames; set `fast_static=False` for strict bit-exactness.
 
 ## Performance
 
-Per-frame, single thread, 1080p (your mileage varies with content and hardware):
+Per-frame, single thread, 1080p (min over repeats, GC disabled). Absolute numbers
+scale with CPU clock; the *shape* is consistent across machines.
 
-| Path                                          | Latency | Throughput |
-|-----------------------------------------------|---------|------------|
-| `image()` (stateless)                         | ~1.1 ms | ~900 fps   |
-| `frame()`, high-motion (no skip)              | ~1.9 ms | ~520 fps   |
-| `frame()`, low-motion (`fast_static` fires)   | ~1.7 ms | ~585 fps   |
-| `+ saliency`/`motion` when read               | +0.5 ms |            |
+| Path                                  | Apple M-series | Linux x86 (slow box) |
+|---------------------------------------|----------------|----------------------|
+| `image()` (stateless)                 | ~0.4 ms        | ~0.9 ms              |
+| `frame()` (temporal)                  | ~0.6 ms        | ~1.6 ms              |
+| `frame()` + all maps read             | ~0.7 ms        | ~2.0 ms              |
+| `frame()` on 50% duplicates           | ~0.5 ms        | ~1.6 ms              |
 
-(Measured on a slow CI-like box; a recent laptop is ~2–3× faster — e.g. `image()`
-~0.55 ms, `frame()` ~1.2 ms.) The heavy pixel work (moments, FAST) is native; the rest
-is small-array numpy. Buffers are preallocated and reused, work is float32, the rolling
-baseline uses a sort instead of `np.median`, derived maps/ROIs are cached, and all array
-outputs are lazy.
+What moves the number, from `examples/benchmark.py` (size / grid / stride / thumb sweeps):
+
+- **`thumb` dominates** — it sets the pixel work. `thumb=64` ≈ 0.3 ms, `128` (default)
+  ≈ 0.9 ms, `256` ≈ 3.0 ms on the slow box. This is the first knob to reach for.
+- **Input resolution barely matters** for `image()` (everything downsizes to `thumb`
+  first); larger frames cost a little more only in the resize, seen mainly in `frame()`.
+- **`stride=1` is fastest** — it hits tensorstats' uint8 fast path; `stride=2` is actually
+  slower, so leave stride at 1 unless profiling says otherwise.
+- **`grid_exp`** scales gently: 16×16 ≈ 0.84 ms, 32×32 ≈ 0.89 ms, 64×64 ≈ 1.04 ms.
+
+The heavy pixel work (moments, FAST) is native; the rest is small-array numpy. Buffers are
+preallocated and reused, work is float32, the rolling baseline uses a sort instead of
+`np.median`, derived maps are cached, and all array outputs are lazy.
 
 ## Project layout
 
@@ -256,10 +265,11 @@ framegate/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals)
 │   └── benchmark.py       # latency measurement
 └── tests/
-    ├── synth.py           # synthetic scene builders
-    ├── test_accuracy.py   # cuts, blank, freeze, fade, flicker, grayscale, maps, dedup
-    ├── test_config.py     # YAML/dataclass parity, overrides, immutability
-    └── test_latency.py    # per-frame latency budget
+    ├── synth.py           # synthetic scene + pattern builders
+    ├── test_accuracy.py   # feature functionality: cuts, blank, freeze, fade, flicker, dedup
+    ├── test_robustness.py # degenerate inputs, value ranges, invariances, config sweeps
+    ├── test_config.py     # YAML template parity, overrides, immutability
+    └── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
 ```
 
 All visualization and timing code lives in `examples/` — the library itself contains

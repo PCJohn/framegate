@@ -1,5 +1,6 @@
 """Temporal layer: StreamAnalyzer consumes FrameStats in order and emits
-TemporalSignals (motion, cut, freeze, fade, flicker). Reset across blank frames,
+TemporalSignals (cut, freeze, fade, flicker; the motion map lives on FrameStats).
+Reset across blank frames,
 since you can't diff a frame against content from before a hard break.
 """
 

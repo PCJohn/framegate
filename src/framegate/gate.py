@@ -20,7 +20,7 @@ import numpy as np
 
 from .config import GateConfig
 from .stats import FrameGate, FrameStats
-from .stream import StreamAnalyzer, TemporalSignals
+from .stream import StreamAnalyzer
 
 
 def _identical(a: np.ndarray, b: np.ndarray) -> bool:
