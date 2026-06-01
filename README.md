@@ -248,6 +248,13 @@ The heavy pixel work (moments, FAST) is native; the rest is small-array numpy. B
 preallocated and reused, work is float32, the rolling baseline uses a sort instead of
 `np.median`, derived maps are cached, and all array outputs are lazy.
 
+A measurement note: these are small-array ops, so OpenCV's default multithreading can add
+scheduling variance at this size (most visible in the grid/stride micro-sweeps on many-core
+machines, where it can briefly invert their tiny orderings). `cv2.setNumThreads(1)` usually
+steadies — and sometimes slightly speeds — them. framegate does not set it globally, since a
+library shouldn't mutate process-wide state; the benchmark also interleaves its sweeps so
+clock drift is spread evenly across configs rather than penalizing whichever ran during a dip.
+
 ## Project layout
 
 ```
