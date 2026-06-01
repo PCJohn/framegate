@@ -18,6 +18,9 @@ from framegate import Gate
 
 HISTORY = 300        # rolling plot window (viz only)
 DISPLAY_MAX = 512    # longest side of the displayed frame
+# fixed, absolute colour ranges for the derived-map panels (display only): so a near-static
+# frame renders dark instead of auto-stretching its noise floor to full brightness.
+MAP_VMAX = {"motion": 32.0, "saliency": 3.0, "texture": 24.0}  # grey levels / z-score / texture units
 GRID_CMAPS = ["inferno", "viridis", "coolwarm", "plasma"]
 MOMENT_LBL = ["mean", "variance", "m3", "m4"]
 TS_PLOTS = [("exposure", "V mean"), ("contrast", "V std"), ("colorfulness", "S mean"),
@@ -61,9 +64,9 @@ def run(src):
     gS = _grid_row([fig.add_subplot(gs[3, c]) for c in range(4)], "S", g)
     ax_m = fig.add_subplot(gs[4, 0]); ax_s = fig.add_subplot(gs[4, 1])
     ax_t = fig.add_subplot(gs[4, 2]); ax_tl = fig.add_subplot(gs[4, 3])
-    im_m = _imshow(ax_m, g, "hot", "motion (illum-invariant)")
-    im_s = _imshow(ax_s, g, "magma", "saliency")
-    im_t = _imshow(ax_t, g, "cividis", "fine texture")
+    im_m = _imshow(ax_m, g, "hot", "motion (illum-invariant)"); im_m.set_clim(0, MAP_VMAX["motion"])
+    im_s = _imshow(ax_s, g, "magma", "saliency"); im_s.set_clim(0, MAP_VMAX["saliency"])
+    im_t = _imshow(ax_t, g, "cividis", "fine texture"); im_t.set_clim(0, MAP_VMAX["texture"])
     ax_tl.set_title("cut score (cut = red line)", fontsize=8); ax_tl.set_xlim(0, HISTORY)
     (ln_cs,) = ax_tl.plot(np.zeros(HISTORY), color="C3", lw=1.0)
     ax_ts = [fig.add_subplot(gs[5 + i // 4, i % 4]) for i in range(len(TS_PLOTS))]
@@ -116,7 +119,7 @@ def run(src):
         g_z = np.zeros((g, g), np.float32)
         for im, d in ((im_m, fs.motion if fs.motion is not None else g_z),
                       (im_s, fs.saliency), (im_t, fs.fine_texture)):
-            im.set_data(d); im.set_clim(0, d.max() + 1e-6)
+            im.set_data(d)                              # fixed absolute clim set at setup
 
         cs = np.asarray(hist["cut_score"]); ln_cs.set_ydata(cs)
         ax_tl.set_ylim(0, max(cs.max(), gate.cfg.cut_dissim) * 1.1 + 1e-3)

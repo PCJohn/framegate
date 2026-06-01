@@ -80,19 +80,21 @@ class FrameStats:
     @property
     def motion(self):
         """(G,G) motion magnitude vs the previous frame -- |residual| after removing global
-        gain/bias -- or None for a standalone image / first / post-blank frame. A local
-        noise floor is subtracted: cfg.motion_floor_k * (local mean of |residual| over a
-        cfg.motion_surround neighborhood), so the threshold adapts to regionally-varying
-        sensor/compression noise instead of one global level. Set motion_floor_k=0 for the
-        raw magnitude. (Center-surround, so it favors motion boundaries over filled
-        interiors; the signed change is in `residual` if you want it.)"""
+        gain/bias -- or None for a standalone image / first / post-blank frame. A noise floor
+        is subtracted: the larger of a relative local floor (cfg.motion_floor_k * local mean
+        |residual| over a cfg.motion_surround neighborhood) and an absolute floor
+        (cfg.motion_abs_floor grey levels). The local term adapts to regionally-varying noise;
+        the absolute term ensures sub-grey-level change reads as no motion on any frame. Set
+        both motion_floor_k and motion_abs_floor to 0 for the raw magnitude; the signed change
+        is always in `residual`."""
         if self.residual is None:
             return None
         m = np.abs(self.residual)
-        k = self.cfg.motion_floor_k
-        if k <= 0.0:
-            return m
-        return np.maximum(m - k * S.box(m, self.cfg.motion_surround, self.cfg.motion_surround), 0.0)
+        floor = self.cfg.motion_abs_floor
+        if self.cfg.motion_floor_k > 0.0:
+            floor = np.maximum(self.cfg.motion_floor_k * S.box(m, self.cfg.motion_surround,
+                                                               self.cfg.motion_surround), floor)
+        return np.maximum(m - floor, 0.0)
 
     @cached_property
     def color_mean(self) -> np.ndarray:

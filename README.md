@@ -124,19 +124,19 @@ since it depends on the previous frame.
 `motion = |residual|`, where the residual is the per-cell luma change after fitting and
 removing a global gain/bias (`a·prev + b`) — so a uniform brightness shift or auto-exposure
 step does **not** read as motion. Raw, the residual still carries per-frame sensor/compression
-speckle, so a **local** noise floor is subtracted:
-`motion = max(|residual| - k·local_mean|residual|, 0)`, where `local_mean` is a box average
-over a `motion_surround` neighborhood and `k = motion_floor_k` (default 1.0). Because the floor
-is local rather than one global level, it adapts to regionally-varying noise (a busy/compressed
-patch gets a higher threshold than a clean sky). Set `motion_floor_k = 0` for the raw magnitude.
-The signed residual is also available as `stats.residual` if you want it before the absolute
-value and threshold.
+speckle, so a noise floor is subtracted: `motion = max(|residual| - floor, 0)`, where
+`floor = max(motion_floor_k · local_mean|residual|, motion_abs_floor)`. The **local** term
+(box average over a `motion_surround` neighborhood, `motion_floor_k` default 1.0) adapts to
+regionally-varying noise; the **absolute** term (`motion_abs_floor`, default 1.0 grey level)
+guarantees that sub-grey-level change — averaged over a ~60×60-px cell, that is just
+sensor/compression dither — reads as no motion on any frame. Set both to 0 for the raw
+magnitude. The signed residual is always available as `stats.residual` if you want it before
+the absolute value and floor.
 
-Note the trade this local (center-surround) floor makes: it favors motion **boundaries** over
-filled interiors, so a large, smoothly-moving region is partly hollowed (its interior matches
-its surround → near zero) while its edges remain, and it does **not** remove isolated single-cell
-speckle. It is strongest when noise is regionally structured and motion is sparse; for a filled
-region map, set `motion_floor_k = 0` and threshold `stats.residual` yourself.
+Note the trade the local (center-surround) term makes: it favors motion **boundaries** over
+filled interiors, so a large, smoothly-moving region is partly hollowed while its edges remain.
+The absolute term is unaffected by this; for a filled-region map set `motion_floor_k = 0` (keep
+`motion_abs_floor`) and you get a plain absolute-thresholded magnitude.
 
 ### Scope: generic descriptors, not object detectors
 

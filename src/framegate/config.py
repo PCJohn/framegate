@@ -58,8 +58,9 @@ class GateConfig:
     sal_surround: int = 7           # neighborhood (cells) for the center-surround luma contrast
 
     # --- motion map ---
-    motion_floor_k: float = 1.0   # subtract k * local-mean|residual| as the noise floor (0 = raw magnitude)
+    motion_floor_k: float = 1.0   # subtract k * local-mean|residual| as the noise floor (0 = off)
     motion_surround: int = 7      # neighborhood (cells) for that local floor
+    motion_abs_floor: float = 1.0 # also subtract at least this many grey levels (0 = off); both 0 = raw |residual|
 
     # --- output ---
     return_frames: bool = True    # attach the thumbnail + HSV to FrameStats for the caller to reuse
