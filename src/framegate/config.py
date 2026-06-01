@@ -54,8 +54,12 @@ class GateConfig:
     ftex_coarse_k: int = 3          # neighborhood for the coarse between-cell energy
     ftex_line_k: int = 5            # horizontal smoothing window (text-line coherence)
 
+    # --- saliency map ---
+    sal_surround: int = 7           # neighborhood (cells) for the center-surround luma contrast
+
     # --- motion map ---
-    motion_floor_k: float = 2.0   # soft noise-floor: zero motion below k * median|residual| (0 = raw)
+    motion_floor_k: float = 1.0   # subtract k * local-mean|residual| as the noise floor (0 = raw magnitude)
+    motion_surround: int = 7      # neighborhood (cells) for that local floor
 
     # --- output ---
     return_frames: bool = True    # attach the thumbnail + HSV to FrameStats for the caller to reuse

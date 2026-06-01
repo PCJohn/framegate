@@ -45,12 +45,14 @@ def best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
     return float(corr[k]), k // n - s, k % n - s
 
 
-def saliency_map(grid_V, grid_S) -> np.ndarray:
+def saliency_map(grid_V, grid_S, surround_k: int) -> np.ndarray:
     """Coarse (G,G) appearance saliency from per-cell stats: V-variance (texture) +
-    S-mean (colorfulness) + |V-mean - frame mean| (luma contrast), z-scored and
-    averaged, clipped at 0. Purely per-frame -- motion is a separate signal, not
-    folded in here."""
-    v_con = np.abs(grid_V[:, :, M_MEAN] - grid_V[:, :, M_MEAN].mean())
+    S-mean (colorfulness) + center-surround luma contrast, z-scored and averaged, clipped
+    at 0. The luma term is |V-mean - local mean| over a `surround_k` neighborhood (a box
+    blur), so a cell is judged against its surround rather than the global frame mean --
+    the standard bottom-up center-surround principle. Purely per-frame; motion is separate."""
+    vmean = grid_V[:, :, M_MEAN].astype(np.float32)
+    v_con = np.abs(vmean - box(vmean, surround_k, surround_k))
     feats = [zscore(grid_V[:, :, M_VAR]), zscore(grid_S[:, :, M_MEAN]), zscore(v_con)]
     return np.mean(feats, axis=0).clip(min=0).astype(np.float32)
 

@@ -68,7 +68,7 @@ class FrameStats:
     # --- derived maps (cached: pure per-frame, so a duplicate frame reuses them) ---
     @cached_property
     def saliency(self):
-        return S.saliency_map(self.grid_V, self.grid_S)
+        return S.saliency_map(self.grid_V, self.grid_S, self.cfg.sal_surround)
 
     @cached_property
     def fine_texture(self):
@@ -80,19 +80,19 @@ class FrameStats:
     @property
     def motion(self):
         """(G,G) motion magnitude vs the previous frame -- |residual| after removing global
-        gain/bias -- or None for a standalone image / first / post-blank frame. A soft
-        noise-floor (cfg.motion_floor_k * median|residual|) is subtracted so per-frame
-        sensor/compression speckle reads as zero and only coherent change survives; set
-        motion_floor_k=0 for the raw magnitude. The single motion quantity (e.g. for the
-        visualizer or for the caller's own region extraction)."""
+        gain/bias -- or None for a standalone image / first / post-blank frame. A local
+        noise floor is subtracted: cfg.motion_floor_k * (local mean of |residual| over a
+        cfg.motion_surround neighborhood), so the threshold adapts to regionally-varying
+        sensor/compression noise instead of one global level. Set motion_floor_k=0 for the
+        raw magnitude. (Center-surround, so it favors motion boundaries over filled
+        interiors; the signed change is in `residual` if you want it.)"""
         if self.residual is None:
             return None
         m = np.abs(self.residual)
         k = self.cfg.motion_floor_k
         if k <= 0.0:
             return m
-        t = k * float(np.median(m))
-        return np.maximum(m - t, 0.0)
+        return np.maximum(m - k * S.box(m, self.cfg.motion_surround, self.cfg.motion_surround), 0.0)
 
     @cached_property
     def color_mean(self) -> np.ndarray:
