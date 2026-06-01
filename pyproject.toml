@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "framegate"
+version = "0.1.0"
+description = "A fast, generic pre-pipeline gate for vision inputs (images and video frames)."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Prithvi" }]
+keywords = ["computer-vision", "shot-detection", "saliency", "video", "preprocessing"]
+dependencies = [
+    "numpy>=1.22",
+    "opencv-python>=4.5",
+    "pyyaml>=5.4",
+    # tensorstats provides the fast moment computation and is a prerequisite.
+    # It is not on PyPI; install it first, e.g.:
+    #   pip install git+https://github.com/PCJohn/tensorstats
+]
+
+[project.optional-dependencies]
+viz = ["matplotlib>=3.5"]
+dev = ["pytest>=7.0", "matplotlib>=3.5"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+framegate = ["default.yaml"]
