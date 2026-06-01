@@ -13,7 +13,6 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from matplotlib.patches import Rectangle
 
 from framegate import Gate
 
@@ -72,7 +71,6 @@ def run(src):
     ret, first = cap.read()
     disp0 = cv2.cvtColor(cv2.resize(first, (W, H)), cv2.COLOR_BGR2RGB)
     im_frame = ax_frame.imshow(disp0, aspect="auto")
-    roi_artists = []   # all proposal boxes + labels, rebuilt each frame
     banner = ax_frame.text(0.5, 0.92, "", ha="center", va="center", fontsize=22, fontweight="bold",
                            color="white", transform=ax_frame.transAxes,
                            bbox=dict(boxstyle="round", fc="black", alpha=0.6))
@@ -99,17 +97,6 @@ def run(src):
             cut_frames.append(fidx - 1)
 
         im_frame.set_data(cv2.cvtColor(cv2.resize(frame, (W, H)), cv2.COLOR_BGR2RGB))
-        for a in roi_artists:                   # all regions drawn uniformly; brighter = more agreement
-            a.remove()
-        roi_artists = []
-        for (px0, py0, px1, py1), labels in fs.rois:
-            shade = min(1.0, 0.4 + 0.1 * len(labels))
-            r = Rectangle((px0 * scale, py0 * scale), (px1 - px0) * scale, (py1 - py0) * scale,
-                          fill=False, edgecolor=(1.0, shade, 0.2), lw=1.5, alpha=0.9)
-            ax_frame.add_patch(r)
-            t = ax_frame.text(px0 * scale + 1, py0 * scale + 1, f"{len(labels)}x {labels[0]}",
-                              color=(1.0, shade, 0.2), fontsize=6, va="top", clip_on=True)
-            roi_artists += [r, t]
         banner.set_text("BLANK" if fs.blank else "CUT" if sig.cut else "FREEZE" if sig.freeze else "")
 
         ax_status.clear(); ax_status.axis("off")

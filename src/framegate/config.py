@@ -1,19 +1,19 @@
 """Configuration for the gate.
 
-All tunables live in one immutable dataclass. Three ways to build one:
+All tunables live in one immutable dataclass -- the single source of truth. Build one:
 
     GateConfig()                                  # library defaults
     GateConfig(min_scene_len=6, thumb=96)         # override in code
     GateConfig.from_yaml("my.yaml")               # load from a file
     GateConfig.from_yaml("my.yaml", thumb=96)     # file + code overrides
-    GateConfig.from_yaml()                        # the packaged default.yaml
+    GateConfig.from_yaml()                        # = library defaults (reads no file)
 
-The shipped ``default.yaml`` mirrors these defaults (a test enforces that), so it
-doubles as a documented template to copy and edit.
+There is no shipped YAML to drift from the dataclass: ``from_yaml()`` with no path just
+uses the defaults, and ``to_yaml()`` generates a template from the live fields on demand
+(``python -m framegate.config`` prints one).
 """
 
 from dataclasses import dataclass, fields, replace
-from importlib import resources
 
 import yaml
 
@@ -54,9 +54,8 @@ class GateConfig:
     ftex_coarse_k: int = 3          # neighborhood for the coarse between-cell energy
     ftex_line_k: int = 5            # horizontal smoothing window (text-line coherence)
 
-    # --- roi ---
-    roi_k: float = 1.0         # a cell is active if it deviates > this many std from its map's mean
-    roi_merge_iou: float = 0.75  # merge proposal boxes whose IoU exceeds this (lower = more aggressive)
+    # --- motion map ---
+    motion_floor_k: float = 2.0   # soft noise-floor: zero motion below k * median|residual| (0 = raw)
 
     # --- output ---
     return_frames: bool = True    # attach the thumbnail + HSV to FrameStats for the caller to reuse
@@ -70,17 +69,28 @@ class GateConfig:
 
     @classmethod
     def from_yaml(cls, path=None, **overrides) -> "GateConfig":
+        """Build from a YAML file plus optional code overrides. With no path, returns the
+        library defaults (overrides still apply) -- no file is read."""
         if path is None:
-            text = resources.files("framegate").joinpath("default.yaml").read_text()
+            data = {}
         else:
             with open(path) as f:
-                text = f.read()
-        data = {**(yaml.safe_load(text) or {}), **overrides}
-        known = {f.name for f in fields(cls)}
-        unknown = set(data) - known
+                data = yaml.safe_load(f) or {}
+        data = {**data, **overrides}
+        unknown = set(data) - {f.name for f in fields(cls)}
         if unknown:
             raise ValueError(f"unknown config keys: {sorted(unknown)}")
         return cls(**data)
+
+    @classmethod
+    def to_yaml(cls) -> str:
+        """A YAML template generated from the live dataclass defaults -- the single source
+        of truth, so it cannot drift. Copy, edit, and load with from_yaml(path)."""
+        head = ("# framegate config template (generated from GateConfig defaults).\n"
+                "# See the GateConfig dataclass for what each key does.\n\n")
+        lines = [f"{f.name}: {str(f.default).lower() if isinstance(f.default, bool) else f.default}"
+                 for f in fields(cls)]
+        return head + "\n".join(lines) + "\n"
 
     def replace(self, **overrides) -> "GateConfig":
         return replace(self, **overrides)

@@ -15,8 +15,6 @@ import tensorstats as ts
 from . import signals as S
 from .config import GateConfig
 
-_PROPOSAL_MAPS = ("V_mean", "V_var", "H_mean", "H_var", "S_mean", "S_var", "saliency", "fine_texture")
-
 
 @dataclass
 class FrameStats:
@@ -80,40 +78,21 @@ class FrameStats:
         return S.fine_texture(self.grid_V, self.grid_S, c.ftex_achromatic_w, c.ftex_coarse_k, c.ftex_line_k)
 
     @property
-    def rois(self):
-        """Region proposals as a single labelled list: [(box, [labels]), ...]. Each box
-        (x0,y0,x1,y1) is in source-frame pixels, ready to crop -- frame[y0:y1, x0:x1].
-        Labels name the maps that proposed the region (H/S/V mean+variance, saliency,
-        fine_texture; '_inv' = a map's dark side; on video also 'motion'), so len(labels)
-        reflects how many maps agree. Built in one pass: each map is border-trimmed in both
-        polarities, full-frame (non-localizing) boxes are dropped, and overlapping boxes are
-        merged (cfg.roi_merge_iou). The list is unordered; empty if blank or nothing localizes."""
-        if self.blank:
-            return []
-        g = self.grid
-        stack = np.stack([g[:, :, S.CH_V, S.M_MEAN], g[:, :, S.CH_V, S.M_VAR],
-                          g[:, :, S.CH_H, S.M_MEAN], g[:, :, S.CH_H, S.M_VAR],
-                          g[:, :, S.CH_S, S.M_MEAN], g[:, :, S.CH_S, S.M_VAR],
-                          self.saliency, self.fine_texture])
-        hi, lo = S.roi_boxes(stack, self.shape, self.cfg.roi_k)
-        limit = 0.95 * self.shape[0] * self.shape[1]
-        boxes, labels = [], []
-        for name, bh, bl in zip(_PROPOSAL_MAPS, hi, lo):
-            for tag, b in ((name, bh), (name + "_inv", bl)):
-                if b and (b[2] - b[0]) * (b[3] - b[1]) < limit:
-                    boxes.append(b); labels.append(tag)
-        if self.motion is not None:                       # video: add a moving-region box (hi side only)
-            mb = S.roi_boxes(self.motion[None], self.shape, self.cfg.roi_k)[0][0]
-            if mb and (mb[2] - mb[0]) * (mb[3] - mb[1]) < limit:
-                boxes.append(mb); labels.append("motion")
-        return S.merge_boxes(boxes, labels, self.cfg.roi_merge_iou)
-
-    @property
     def motion(self):
-        """(G,G) motion magnitude = |residual| (change after removing global gain/bias),
-        or None for a standalone image / first / post-blank frame. The single motion
-        quantity, used by both the visualizer and the 'motion' ROI proposal."""
-        return None if self.residual is None else np.abs(self.residual)
+        """(G,G) motion magnitude vs the previous frame -- |residual| after removing global
+        gain/bias -- or None for a standalone image / first / post-blank frame. A soft
+        noise-floor (cfg.motion_floor_k * median|residual|) is subtracted so per-frame
+        sensor/compression speckle reads as zero and only coherent change survives; set
+        motion_floor_k=0 for the raw magnitude. The single motion quantity (e.g. for the
+        visualizer or for the caller's own region extraction)."""
+        if self.residual is None:
+            return None
+        m = np.abs(self.residual)
+        k = self.cfg.motion_floor_k
+        if k <= 0.0:
+            return m
+        t = k * float(np.median(m))
+        return np.maximum(m - t, 0.0)
 
     @cached_property
     def color_mean(self) -> np.ndarray:

@@ -69,58 +69,6 @@ def fine_texture(grid_V, grid_S, achromatic_w: float, coarse_k: int, line_k: int
     return box(score, line_k, 1)
 
 
-def _bbox_stack(mask: np.ndarray, shape) -> list:
-    """For each (G,G) mask in a (K,G,G) stack, the pixel-space bounding box
-    (x0,y0,x1,y1) of its True cells, or None if empty."""
-    k, g, _ = mask.shape
-    sy, sx = shape[0] / g, shape[1] / g
-    rows, cols = mask.any(axis=2), mask.any(axis=1)
-    out = []
-    for i in range(k):
-        r, c = np.where(rows[i])[0], np.where(cols[i])[0]
-        out.append(None if r.size == 0 else
-                   (int(c[0] * sx), int(r[0] * sy), int((c[-1] + 1) * sx), int((r[-1] + 1) * sy)))
-    return out
-
-
-def roi_boxes(stack: np.ndarray, shape, k: float):
-    """Trim-based bounding boxes for every map in a (K,G,G) stack, in both
-    polarities: cells above mean + k*std ('hi', the bright/active region) and
-    below mean - k*std ('lo', the dark/inverse region). Each map is judged by its
-    own statistics, so one cheap pass yields a diverse set of candidate ROIs that
-    catch subjects a single map would miss. Returns (hi_boxes, lo_boxes)."""
-    mu = stack.mean(axis=(1, 2), keepdims=True)
-    sd = stack.std(axis=(1, 2), keepdims=True) + 1e-6
-    return _bbox_stack(stack > mu + k * sd, shape), _bbox_stack(stack < mu - k * sd, shape)
-
-
-def merge_boxes(boxes, labels, iou_thr: float):
-    """Reconcile overlapping candidate boxes into one labelled list. All-pairs IoU is
-    computed once (vectorized), then a greedy pass keeps the box with the most overlap
-    support as the representative and absorbs everything it overlaps, accumulating their
-    labels. Returns [(box, [labels...]), ...]; the label list records which maps proposed
-    the region. Cheap because the set is tiny."""
-    if not boxes:
-        return []
-    b = np.asarray(boxes, np.float32)
-    x1, y1, x2, y2 = b.T
-    area = (x2 - x1) * (y2 - y1)
-    xx1 = np.maximum(x1[:, None], x1); yy1 = np.maximum(y1[:, None], y1)
-    xx2 = np.minimum(x2[:, None], x2); yy2 = np.minimum(y2[:, None], y2)
-    inter = np.clip(xx2 - xx1, 0, None) * np.clip(yy2 - yy1, 0, None)
-    iou = inter / (area[:, None] + area - inter + 1e-9)
-    adj = iou > iou_thr
-    used = np.zeros(len(boxes), bool)
-    out = []
-    for i in adj.sum(1).argsort()[::-1]:        # most-overlapping seed first
-        if used[i]:
-            continue
-        members = adj[i] & ~used
-        used |= members
-        out.append((boxes[i], sorted(labels[j] for j in np.where(members)[0])))
-    return out
-
-
 def fade_score(series: np.ndarray, span: float) -> float:
     """Signed fade strength in [-1, 1] over a brightness series: sign = direction
     (negative = darkening), magnitude = monotonicity * normalized span."""

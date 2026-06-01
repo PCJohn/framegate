@@ -50,12 +50,21 @@ def main():
         label = f"synthetic {frames[0].shape[1]}x{frames[0].shape[0]}"
     print(f"benchmark on {len(frames)} frames ({label})\n")
 
-    ms_img = _time(lambda f: Gate().image(f), frames)
+    g0 = Gate()
+    ms_img = _time(lambda f: g0.image(f), frames)
     print(f"  image() (stateless)        {ms_img:6.2f} ms/frame  ({1000 / ms_img:5.0f} fps)")
 
     g = Gate()
     ms_vid = _time(lambda f: g.frame(f), frames)
     print(f"  frame() (temporal)         {ms_vid:6.2f} ms/frame  ({1000 / ms_vid:5.0f} fps)")
+
+    # cost of also reading the feature maps (lazy; not paid unless accessed)
+    gm = Gate()
+    def _with_maps(f):
+        fs, _ = gm.frame(f)
+        fs.saliency; fs.fine_texture; _ = fs.motion
+    ms_map = _time(_with_maps, frames)
+    print(f"  frame() + saliency/motion  {ms_map:6.2f} ms/frame  ({1000 / ms_map:5.0f} fps)")
 
     # duplicate-heavy workload (every frame repeated) to show the lossless skip
     dup = [f for f in frames[:150] for _ in range(2)]

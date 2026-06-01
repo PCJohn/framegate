@@ -92,20 +92,6 @@ def test_grayscale_input_is_colorless_but_detects_cuts():
     assert cuts == [20]
 
 
-def test_rois_trim_to_subject_and_drop_full_frame():
-    rng = np.random.default_rng(2)
-    frame = np.full((400, 600, 3), 20, np.uint8)
-    frame[140:260, 220:380] = (rng.random((120, 160, 3)) * 255).astype(np.uint8)
-    rois = Gate().image(frame).rois
-    assert rois                                       # something localized
-    (x0, y0, x1, y1), labels = rois[0]                # consensus region hugs the subject
-    assert 180 < x0 < 240 and 360 < x1 < 420
-    assert 110 < y0 < 170 and 240 < y1 < 290
-    assert len(labels) >= 2 and all(isinstance(s, str) for s in labels)
-    busy = (rng.random((400, 600, 3)) * 255).astype(np.uint8)
-    assert Gate().image(busy).rois == []              # nothing localizes -> empty (use whole frame)
-
-
 def test_single_image_path_needs_no_stream():
     fs = Gate().image(synth.hsv_scene(60, 2))
     for k in ["exposure", "contrast", "colorfulness", "detail", "clipping", "noise_floor"]:
@@ -129,34 +115,6 @@ def test_duplicate_skip_is_lossless():
     assert outputs(True) == outputs(False)
 
 
-def test_rois_are_labelled_and_localized():
-    rng = np.random.default_rng(2)
-    frame = np.full((400, 600, 3), 20, np.uint8)
-    frame[140:260, 220:380] = (rng.random((120, 160, 3)) * 255).astype(np.uint8)
-    rois = Gate().image(frame).rois
-    assert rois
-    area = 400 * 600
-    seen = set()
-    for (x0, y0, x1, y1), labels in rois:
-        assert (x1 - x0) * (y1 - y0) < 0.95 * area               # every box localizes
-        assert labels and labels == sorted(labels)               # labelled, deterministic order
-        assert (x0, y0, x1, y1) not in seen                      # no duplicate boxes
-        seen.add((x0, y0, x1, y1))
-    g = synth.grayscale_scene(2)
-    assert isinstance(Gate().image(g).rois, list)                # grayscale path runs
-
-
-def test_rois_merge_aggregates_labels():
-    rng = np.random.default_rng(2)
-    frame = np.full((400, 600, 3), 20, np.uint8)
-    frame[140:260, 220:380] = (rng.random((120, 160, 3)) * 255).astype(np.uint8)
-    fs = Gate().image(frame)
-    aggressive = fs.rois                                         # default merge_iou = 0.5
-    none = Gate(GateConfig(roi_merge_iou=1.0)).image(frame).rois  # only exact duplicates removed
-    assert len(aggressive) <= len(none)                          # merging reduces the count
-    assert sum(len(l) for _, l in aggressive) >= 8               # all map proposals accounted for
-
-
 def test_return_frames_default_on_and_toggleable():
     t = GateConfig().thumb
     fs = Gate().image(synth.hsv_scene(60, 2))
@@ -175,7 +133,7 @@ def test_fast_static_matches_full_search_on_cuts():
     assert on == off == [20]
 
 
-def test_appearance_maps_cached_motion_aware_rois_recompute():
+def test_appearance_maps_cached_and_reused_on_duplicate():
     rng = np.random.default_rng(3)
     img = rng.integers(0, 256, (360, 640, 3), dtype=np.uint8)
     g = Gate()
@@ -184,24 +142,33 @@ def test_appearance_maps_cached_motion_aware_rois_recompute():
     assert fs1.fine_texture is fs1.fine_texture
     fs2, _ = g.frame(img.copy())                             # byte-identical -> stats reused
     assert fs2 is fs1                                         # duplicate-skip returns the same object
-    assert fs2.saliency is fs1.saliency                      # appearance reused for free
-    # rois is recomputed (depends on motion, which is not a pure function of one frame)
-    assert isinstance(fs2.rois, list)
+    assert fs2.saliency is fs1.saliency                      # reused for free
 
 
-def test_motion_roi_only_on_video_with_movement():
-    # a bright block that jumps location each frame -> a moving region
-    def frame_at(x):
+def test_motion_map_only_on_video_and_denoised():
+    G = GateConfig().grid_size
+
+    def frame_at(x):                                         # a bright block that moves each frame
         f = np.full((240, 420, 3), 30, np.uint8)
         f[60:180, x:x + 120] = 220
         return f
+
+    assert Gate().image(frame_at(100)).motion is None        # a still image has no motion
+
     g = Gate()
-    labels_seen = set()
-    for x in (40, 70, 100, 130, 160, 190):
+    for x in (40, 70, 100, 130, 160):
         fs, _ = g.frame(frame_at(x))
-        for _, labels in fs.rois:
-            labels_seen.update(labels)
-    assert "motion" in labels_seen                           # video path proposes a motion ROI
-    # a standalone image never has motion
-    img_labels = {l for _, ls in Gate().image(frame_at(100)).rois for l in ls}
-    assert "motion" not in img_labels
+    assert fs.motion.shape == (G, G)                         # (G,G) magnitude map
+    assert fs.motion.min() >= 0.0 and fs.motion.max() > 0.0  # movement registers
+
+    # the noise floor suppresses static sensor speckle: a near-static noisy stream -> mostly zeros
+    rng = np.random.default_rng(5)
+    base = rng.integers(110, 140, (240, 420, 3), dtype=np.uint8)
+    gq = Gate()
+    for _ in range(4):
+        noisy = np.clip(base.astype(int) + rng.integers(-3, 4, base.shape), 0, 255).astype(np.uint8)
+        fsq, _ = gq.frame(noisy)
+    cleaned = float((fsq.motion == 0).mean())
+    raw = float((np.abs(fsq.residual) == 0).mean())
+    assert cleaned > raw                                     # denoise zeroes speckle the raw map keeps
+    assert cleaned > 0.5                                     # most of a static noisy frame reads as no-motion

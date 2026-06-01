@@ -26,6 +26,3 @@ dev = ["pytest>=7.0", "matplotlib>=3.5"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-framegate = ["default.yaml"]

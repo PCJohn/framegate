@@ -16,7 +16,7 @@ gate = Gate()
 # single image
 stats = gate.image(img)
 if not stats.blank:
-    run_detector(img, roi=stats.roi)        # roi = (x0, y0, x1, y1) or None
+    run_detector(img, saliency=stats.saliency)   # (G,G) maps; threshold/cluster as you like
 
 # video
 for frame in frames:
@@ -24,7 +24,7 @@ for frame in frames:
     if sig.cut:
         start_new_shot()
     if not (stats.blank or sig.freeze):
-        run_detector(frame, rois=stats.rois)
+        run_detector(frame, saliency=stats.saliency, motion=stats.motion)
 ```
 
 ## Install
@@ -72,7 +72,6 @@ Single-frame (`FrameStats`, available for images and video):
 | `saliency`       | (G×G) coarse saliency map. |
 | `fine_texture`   | (G×G) fine high-frequency achromatic texture; a generic text/print/UI cue (not OCR). |
 | `motion`         | (G×G) motion magnitude vs the previous frame, or `None` for a still image (video only). |
-| `rois`           | Region proposals as one labelled list: `[(box, [labels]), ...]` (see below). |
 
 Temporal (`TemporalSignals`, video only):
 
@@ -100,36 +99,39 @@ A cut fires only when that score is a **robust (median+MAD) outlier**, is an
 **isolated peak** (rejecting gradual pans/dissolves), and clears a **minimum shot
 length** debounce — confirmed with one frame of latency.
 
-### ROI: one labelled list
+### Feature maps: you build the regions
 
-`rois` returns a single list of labelled region proposals:
+The gate returns the coarse per-cell maps and leaves region extraction to you — what counts
+as a region (threshold, connected components, top-k cells, your own model on the cell stats)
+is application-specific, so the library stays a pure, fast descriptor rather than baking in
+one opinionated ROI policy:
 
-```python
-[((x0, y0, x1, y1), ["saliency", "S_mean", "V_mean", "H_mean_inv", ...]),
- ((x0, y0, x1, y1), ["fine_texture"]),
- ...]
-```
+- **`saliency`** — `(G×G)` appearance saliency: z-scored V-variance (texture) + S-mean
+  (colorfulness) + luma contrast, averaged and clipped at 0. Purely per-frame.
+- **`fine_texture`** — `(G×G)` fine high-frequency achromatic texture, a generic
+  text/print/UI cue (not OCR).
+- **`motion`** — `(G×G)` motion magnitude vs the previous frame (`None` for a still image).
+  See below.
 
-Every map (H/S/V mean and variance, saliency, fine_texture, and on video `motion`) is border-trimmed in **both
-polarities** to a candidate box — because the gate is statistical, not semantic, no
-single map is reliable: saliency can smear across a frame while `S_mean` cleanly segments
-a person, the *inverse* of `H_mean` isolates a dark face on a bright hue field, and
-`V_var`/`fine_texture` localize print that saliency washes out (`_inv` = a map's dark
-side). The candidates are then merged by a cheap vectorized IoU pass (`roi_merge_iou`,
-default 0.5 — aggressive): overlapping boxes collapse into one, accumulating the labels of
-the maps that backed them, so `len(labels)` reflects how many maps agree. Coordinates are
-source-frame pixels ready to crop (`frame[y0:y1, x0:x1]`), quantized to the cell grid.
-The list is unordered. Full-frame (non-localizing) boxes are
-dropped, so `rois` is empty when nothing stands out (treat as "use the whole frame").
+All three are `(G×G)` (`G = 2**grid_exp`, default 32) at thumbnail scale; multiply cell
+indices by `shape / G` to map back to source pixels. `saliency` and `fine_texture` are
+cached on the `FrameStats`, so a duplicate frame reuses them for free; `motion` is recomputed
+since it depends on the previous frame.
 
-Set `roi_merge_iou = 1.0` to merge only exact duplicates (every map's box kept separately);
-lower values merge more. Connected-components per map (to split disjoint blobs) was
-measured and **rejected**: at 32×32 the cv2 per-call overhead makes it ~25× the cost of the
-trim for marginal gain on a coarse gate. The cross-map diversity is the cheaper source of
-multiple boxes; the IoU merge reconciles them in tens of microseconds. All derived maps
-maps (saliency, fine_texture) are cached on the `FrameStats`, so a duplicate frame reuses
-them for free; `rois` is recomputed (it depends on `motion`, which is relative to the
-previous frame) but over those cached maps, so it stays cheap and correct.
+### Motion map and its noise floor
+
+`motion = |residual|`, where the residual is the per-cell luma change after fitting and
+removing a global gain/bias (`a·prev + b`) — so a uniform brightness shift or auto-exposure
+step does **not** read as motion. Raw, the residual still carries per-frame sensor/compression
+speckle, so a soft noise-floor is subtracted: `motion = max(|residual| - k·median|residual|, 0)`
+with `k = motion_floor_k` (default 2.0). `median|residual|` is a robust per-frame estimate of
+that speckle level, so the floor adapts to each frame; coherent change survives (shrunk by the
+floor), isolated speckle goes to zero. Set `motion_floor_k = 0` for the raw magnitude, raise it
+if a noisy/low-light source still salts the map. The signed residual is also available as
+`stats.residual` if you want it before the absolute value and threshold.
+
+(If your residual noise is concentrated in textured regions rather than uniform, normalizing
+by local contrast instead of a flat floor works better — easy to add on top of `residual`.)
 
 ### Scope: generic descriptors, not object detectors
 
@@ -162,8 +164,10 @@ Gate(GateConfig.from_yaml("my_config.yaml"))      # load from a file
 Gate(GateConfig.from_yaml("my_config.yaml", thumb=96))   # file + code overrides
 ```
 
-`src/framegate/default.yaml` lists every parameter with its default and doubles as a
-documented template to copy. Unknown keys raise immediately.
+`GateConfig` is the single source of truth for every tunable (see the dataclass for what
+each does). There is no shipped YAML to drift from it: `from_yaml()` with no path returns
+the defaults, and `GateConfig.to_yaml()` generates a template from the live fields on
+demand (`python -m framegate > my_config.yaml`). Unknown keys raise immediately.
 
 ## Input formats
 
@@ -171,7 +175,7 @@ documented template to copy. Unknown keys raise immediately.
 - **Grayscale**: `uint8`, shape `(H, W)` or `(H, W, 1)`. Treated as `H=S=0, V=luma`,
   so colour signals correctly read as zero and cuts still fire via the luma path.
 
-Any resolution is accepted; the frame is thumbnailed internally and `roi` is mapped
+Any resolution is accepted; the frame is thumbnailed internally and map cells are mapped
 back to source pixels.
 
 ### Reused frames
@@ -222,7 +226,7 @@ Per-frame, single thread, 1080p (your mileage varies with content and hardware):
 | `image()` (stateless)                         | ~1.1 ms | ~900 fps   |
 | `frame()`, high-motion (no skip)              | ~1.9 ms | ~520 fps   |
 | `frame()`, low-motion (`fast_static` fires)   | ~1.7 ms | ~585 fps   |
-| `+ rois` when read                            | +0.6 ms |            |
+| `+ saliency`/`motion` when read               | +0.5 ms |            |
 
 (Measured on a slow CI-like box; a recent laptop is ~2–3× faster — e.g. `image()`
 ~0.55 ms, `frame()` ~1.2 ms.) The heavy pixel work (moments, FAST) is native; the rest
@@ -242,14 +246,13 @@ framegate/
 │   ├── signals.py         # pure numeric core (no state, easy to test/port)
 │   ├── stats.py           # FrameGate + FrameStats (per-frame extraction)
 │   ├── stream.py          # StreamAnalyzer + TemporalSignals (temporal layer)
-│   ├── gate.py            # Gate facade + lossless duplicate skip
-│   └── default.yaml       # default config / template
+│   └── gate.py            # Gate facade + lossless duplicate skip
 ├── examples/
-│   ├── visualize.py       # live matplotlib dashboard (draws the ROI box)
+│   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals)
 │   └── benchmark.py       # latency measurement
 └── tests/
     ├── synth.py           # synthetic scene builders
-    ├── test_accuracy.py   # cuts, blank, freeze, fade, flicker, grayscale, roi, dedup
+    ├── test_accuracy.py   # cuts, blank, freeze, fade, flicker, grayscale, maps, dedup
     ├── test_config.py     # YAML/dataclass parity, overrides, immutability
     └── test_latency.py    # per-frame latency budget
 ```
