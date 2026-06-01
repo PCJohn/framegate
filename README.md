@@ -224,25 +224,28 @@ inert on high-motion frames; set `fast_static=False` for strict bit-exactness.
 
 ## Performance
 
-Per-frame, single thread, 1080p (min over repeats, GC disabled). Absolute numbers
-scale with CPU clock; the *shape* is consistent across machines.
+Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time).
+Absolute numbers scale with CPU clock; the *shape* is consistent across machines.
 
 | Path                                  | Apple M-series | Linux x86 (slow box) |
 |---------------------------------------|----------------|----------------------|
-| `image()` (stateless)                 | ~0.4 ms        | ~0.9 ms              |
-| `frame()` (temporal)                  | ~0.6 ms        | ~1.6 ms              |
-| `frame()` + all maps read             | ~0.7 ms        | ~2.0 ms              |
-| `frame()` on 50% duplicates           | ~0.5 ms        | ~1.6 ms              |
+| `image()` (stateless)                 | ~0.35 ms       | ~0.8 ms              |
+| `frame()` (temporal)                  | ~0.6 ms        | ~1.5 ms              |
+| `frame()` + all maps read             | ~0.7 ms        | ~1.7 ms              |
+| `frame()` on 50% duplicates           | ~0.5 ms        | ~1.5 ms              |
 
-What moves the number, from `examples/benchmark.py` (size / grid / stride / thumb sweeps):
+What moves the number, from `examples/benchmark.py` (size / grid / stride / thumb sweeps;
+figures below are from Apple silicon):
 
-- **`thumb` dominates** — it sets the pixel work. `thumb=64` ≈ 0.3 ms, `128` (default)
-  ≈ 0.9 ms, `256` ≈ 3.0 ms on the slow box. This is the first knob to reach for.
+- **`thumb` dominates** — it sets the pixel work: `thumb=64` ≈ 0.12 ms, `128` (default)
+  ≈ 0.35 ms, `256` ≈ 1.25 ms. This is the first knob to reach for.
 - **Input resolution barely matters** for `image()` (everything downsizes to `thumb`
-  first); larger frames cost a little more only in the resize, seen mainly in `frame()`.
-- **`stride=1` is fastest** — it hits tensorstats' uint8 fast path; `stride=2` is actually
-  slower, so leave stride at 1 unless profiling says otherwise.
-- **`grid_exp`** scales gently: 16×16 ≈ 0.84 ms, 32×32 ≈ 0.89 ms, 64×64 ≈ 1.04 ms.
+  first): ~0.32 ms at 360p rising to only ~0.37 ms at 4K. Larger frames cost more only in
+  the resize, seen mainly in `frame()` (~0.5 ms → ~0.8 ms at 4K).
+- **`stride=1` hits tensorstats' uint8 fast path**, so it beats `stride=2` (the general
+  path on the same data, ~0.39 vs ~0.35 ms); higher strides subsample more so can be faster
+  still but coarsen the stats. Leave stride at 1 unless profiling says otherwise.
+- **`grid_exp` scales gently**: 16×16 and 32×32 ≈ 0.35 ms, 64×64 ≈ 0.38 ms.
 
 The heavy pixel work (moments, FAST) is native; the rest is small-array numpy. Buffers are
 preallocated and reused, work is float32, the rolling baseline uses a sort instead of
