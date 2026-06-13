@@ -26,7 +26,9 @@ from .stream import StreamAnalyzer
 def _identical(a: np.ndarray, b: np.ndarray) -> bool:
     if a.shape != b.shape or a.dtype != b.dtype:
         return False
-    if not np.array_equal(a[::16, ::16], b[::16, ::16]):   # cheap reject for distinct frames
+    if not np.array_equal(
+        a[::16, ::16], b[::16, ::16]
+    ):  # cheap reject for distinct frames
         return False
     return np.array_equal(a, b)
 
@@ -45,8 +47,11 @@ class Gate:
 
     def frame(self, frame: np.ndarray):
         """Analyze the next video frame. Returns (FrameStats, TemporalSignals)."""
-        if (self.cfg.skip_duplicates and self._last_frame is not None
-                and _identical(frame, self._last_frame)):
+        if (
+            self.cfg.skip_duplicates
+            and self._last_frame is not None
+            and _identical(frame, self._last_frame)
+        ):
             fs = self._last_stats
         else:
             fs = self._gate.process(frame)

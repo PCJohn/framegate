@@ -20,50 +20,74 @@ from .config import GateConfig
 class FrameStats:
     """Everything a single frame yields. Raw central moments [mean, var, m3, m4].
     Signals are lazy properties, so callers pay only for what they read."""
-    chan: np.ndarray            # (3, 4) per-channel H/S/V moments
-    grid: np.ndarray            # (G, G, C, 4) [row, col, channel, moment]
+
+    chan: np.ndarray  # (3, 4) per-channel H/S/V moments
+    grid: np.ndarray  # (G, G, C, 4) [row, col, channel, moment]
     blank: bool
-    shape: tuple                # source (H, W), so spatial outputs map to pixels
+    shape: tuple  # source (H, W), so spatial outputs map to pixels
     cfg: GateConfig
-    thumb: Optional[np.ndarray] = None   # resized input (BGR or gray), if cfg.return_frames
-    hsv: Optional[np.ndarray] = None     # its HSV, if cfg.return_frames
-    residual: Optional[np.ndarray] = None  # (G,G) photometric change vs the previous frame;
+    thumb: Optional[np.ndarray] = (
+        None  # resized input (BGR or gray), if cfg.return_frames
+    )
+    hsv: Optional[np.ndarray] = None  # its HSV, if cfg.return_frames
+    residual: Optional[np.ndarray] = (
+        None  # (G,G) photometric change vs the previous frame;
+    )
     #   set by StreamAnalyzer, None for a standalone image or the first/post-blank frame
 
     # --- per-channel grids (views; raw moments) ---
     @property
-    def grid_H(self): return self.grid[:, :, S.CH_H, :]
-    @property
-    def grid_S(self): return self.grid[:, :, S.CH_S, :]
-    @property
-    def grid_V(self): return self.grid[:, :, S.CH_V, :]
+    def grid_H(self):
+        return self.grid[:, :, S.CH_H, :]
 
     @property
-    def v_cell_mean(self): return self.grid[:, :, S.CH_V, S.M_MEAN]
+    def grid_S(self):
+        return self.grid[:, :, S.CH_S, :]
+
     @property
-    def v_cell_var(self): return self.grid[:, :, S.CH_V, S.M_VAR]
+    def grid_V(self):
+        return self.grid[:, :, S.CH_V, :]
+
+    @property
+    def v_cell_mean(self):
+        return self.grid[:, :, S.CH_V, S.M_MEAN]
+
+    @property
+    def v_cell_var(self):
+        return self.grid[:, :, S.CH_V, S.M_VAR]
 
     # --- generic single-frame signals ---
     @property
-    def exposure(self): return float(self.chan[S.CH_V, S.M_MEAN])
+    def exposure(self):
+        return float(self.chan[S.CH_V, S.M_MEAN])
+
     @property
-    def contrast(self): return float(np.sqrt(max(self.chan[S.CH_V, S.M_VAR], 0.0)))
+    def contrast(self):
+        return float(np.sqrt(max(self.chan[S.CH_V, S.M_VAR], 0.0)))
+
     @property
-    def colorfulness(self): return float(self.chan[S.CH_S, S.M_MEAN])   # ~0 -> grayscale/graphic
+    def colorfulness(self):
+        return float(self.chan[S.CH_S, S.M_MEAN])  # ~0 -> grayscale/graphic
+
     @property
-    def detail(self): return float(self.v_cell_var.mean())              # SI-like spatial complexity
+    def detail(self):
+        return float(self.v_cell_var.mean())  # SI-like spatial complexity
+
     @property
-    def flat_fraction(self): return float((self.v_cell_var < self.cfg.solid_thresh).mean())
+    def flat_fraction(self):
+        return float((self.v_cell_var < self.cfg.solid_thresh).mean())
+
     @property
     def noise_floor(self):
         """Std of the flattest cell ~= sensor / compression noise floor."""
         return float(np.sqrt(max(self.v_cell_var.min(), 0.0)))
+
     @property
     def clipping(self):
         """Exposure asymmetry from V skew. >0: piled near black (crushed shadows);
         <0: piled near white (blown highlights); ~0: balanced."""
         sd = self.chan[S.CH_V, S.M_VAR] ** 0.5
-        return float(self.chan[S.CH_V, S.M_M3] / sd ** 3) if sd > 1e-6 else 0.0
+        return float(self.chan[S.CH_V, S.M_M3] / sd**3) if sd > 1e-6 else 0.0
 
     # --- derived maps (cached: pure per-frame, so a duplicate frame reuses them) ---
     @cached_property
@@ -75,7 +99,13 @@ class FrameStats:
         """(G,G) fine high-frequency achromatic texture -- a generic text/print/UI
         cue (not OCR). See signals.fine_texture."""
         c = self.cfg
-        return S.fine_texture(self.grid_V, self.grid_S, c.ftex_achromatic_w, c.ftex_coarse_k, c.ftex_line_k)
+        return S.fine_texture(
+            self.grid_V,
+            self.grid_S,
+            c.ftex_achromatic_w,
+            c.ftex_coarse_k,
+            c.ftex_line_k,
+        )
 
     @property
     def motion(self):
@@ -92,8 +122,11 @@ class FrameStats:
         m = np.abs(self.residual)
         floor = self.cfg.motion_abs_floor
         if self.cfg.motion_floor_k > 0.0:
-            floor = np.maximum(self.cfg.motion_floor_k * S.box(m, self.cfg.motion_surround,
-                                                               self.cfg.motion_surround), floor)
+            floor = np.maximum(
+                self.cfg.motion_floor_k
+                * S.box(m, self.cfg.motion_surround, self.cfg.motion_surround),
+                floor,
+            )
         return np.maximum(m - floor, 0.0)
 
     @cached_property
@@ -101,8 +134,13 @@ class FrameStats:
         """Global saturation + saturation-weighted hue vector [S, S*cos2H, S*sin2H],
         averaged over cells. Unsaturated cells (hue = noise) contribute ~nothing."""
         sat = self.grid_S[:, :, S.M_MEAN]
-        ang = self.grid_H[:, :, S.M_MEAN] * (np.pi / 90.0)   # OpenCV hue 0..180 -> 0..2pi
-        return np.array([sat.mean(), (sat * np.cos(ang)).mean(), (sat * np.sin(ang)).mean()], np.float32)
+        ang = self.grid_H[:, :, S.M_MEAN] * (
+            np.pi / 90.0
+        )  # OpenCV hue 0..180 -> 0..2pi
+        return np.array(
+            [sat.mean(), (sat * np.cos(ang)).mean(), (sat * np.sin(ang)).mean()],
+            np.float32,
+        )
 
 
 class FrameGate:
@@ -114,15 +152,18 @@ class FrameGate:
     def __init__(self, cfg: GateConfig = None):
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
-        self._fast = cv2.FastFeatureDetector_create(threshold=self.cfg.fast_thresh,
-                                                     nonmaxSuppression=False)
+        self._fast = cv2.FastFeatureDetector_create(
+            threshold=self.cfg.fast_thresh, nonmaxSuppression=False
+        )
         self._stats = ts.StatsComputer(
             shape=(t, t, 3),
             axes=[(0, 1)],
             stride=(self.cfg.stride, self.cfg.stride, 1),
             grid=(self.cfg.grid_exp, self.cfg.grid_exp, 2),
         )
-        self._bgr = np.empty((t, t, 3), np.uint8)    # scratch reused when not returning frames
+        self._bgr = np.empty(
+            (t, t, 3), np.uint8
+        )  # scratch reused when not returning frames
         self._gray = np.empty((t, t), np.uint8)
         self._hsv = np.empty((t, t, 3), np.uint8)
 
@@ -134,8 +175,12 @@ class FrameGate:
         hsv = np.empty((t, t, 3), np.uint8) if keep else self._hsv
         if frame.ndim == 2 or frame.shape[2] == 1:
             thumb = np.empty((t, t), np.uint8) if keep else self._gray
-            cv2.resize(frame.reshape(frame.shape[0], frame.shape[1]), (t, t),
-                       dst=thumb, interpolation=cv2.INTER_NEAREST)
+            cv2.resize(
+                frame.reshape(frame.shape[0], frame.shape[1]),
+                (t, t),
+                dst=thumb,
+                interpolation=cv2.INTER_NEAREST,
+            )
             hsv[:, :, :2] = 0
             hsv[:, :, 2] = thumb
         else:
@@ -150,11 +195,20 @@ class FrameGate:
         hsv, thumb = self._to_hsv(frame, keep)
         r = self._stats.compute(hsv)
         chan = r["0,1"].astype(np.float32)
-        grid = r["grid"].astype(np.float32)
+        grid = r["grid_0"].astype(np.float32)
 
         # Lossless: a stats-flat frame has no FAST corners, so skip the detector.
-        blank = (float(grid[:, :, S.CH_V, S.M_VAR].max()) < self.cfg.solid_thresh
-                 or len(self._fast.detect(hsv[:, :, S.CH_V], None)) == 0)
+        blank = (
+            float(grid[:, :, S.CH_V, S.M_VAR].max()) < self.cfg.solid_thresh
+            or len(self._fast.detect(hsv[:, :, S.CH_V], None)) == 0
+        )
 
-        return FrameStats(chan=chan, grid=grid, blank=blank, shape=(h, w), cfg=self.cfg,
-                          thumb=thumb, hsv=hsv if keep else None)
+        return FrameStats(
+            chan=chan,
+            grid=grid,
+            blank=blank,
+            shape=(h, w),
+            cfg=self.cfg,
+            thumb=thumb,
+            hsv=hsv if keep else None,
+        )

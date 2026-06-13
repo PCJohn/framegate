@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-# tensorstats layout: result["0,1"] is (3, 4) per-channel moments; result["grid"]
+# tensorstats layout: result["0,1"] is (3, 4) per-channel moments; result["grid_0"]
 # is (G, G, C, 4) = [row, col, channel, moment].
 CH_H, CH_S, CH_V = 0, 1, 2
 M_MEAN, M_VAR, M_M3, M_M4 = 0, 1, 2, 3
@@ -24,7 +24,9 @@ def zscore(x: np.ndarray) -> np.ndarray:
 
 def box(x: np.ndarray, kx: int, ky: int) -> np.ndarray:
     """Normalized box filter (kx wide, ky tall), replicating the border."""
-    return cv2.boxFilter(x, -1, (kx, ky), normalize=True, borderType=cv2.BORDER_REPLICATE)
+    return cv2.boxFilter(
+        x, -1, (kx, ky), normalize=True, borderType=cv2.BORDER_REPLICATE
+    )
 
 
 def best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
@@ -34,14 +36,22 @@ def best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
     vectorized over all (2s+1)^2 shifts via a sliding-window view."""
     if s <= 0:
         a, b = prev - prev.mean(), cur - cur.mean()
-        return float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-6)), 0, 0
-    g = prev.shape[-1]; h = g - 2 * s
-    c = cur[s:s + h, s:s + h]; c = c - c.mean(); nc = np.sqrt((c * c).sum()) + 1e-6
+        return (
+            float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-6)),
+            0,
+            0,
+        )
+    g = prev.shape[-1]
+    h = g - 2 * s
+    c = cur[s : s + h, s : s + h]
+    c = c - c.mean()
+    nc = np.sqrt((c * c).sum()) + 1e-6
     wins = sliding_window_view(prev, (h, h)).reshape(-1, h, h)
     a = wins - wins.mean(axis=(1, 2), keepdims=True)
     na = np.sqrt((a * a).sum(axis=(1, 2))) + 1e-6
     corr = (a * c).sum(axis=(1, 2)) / (na * nc)
-    k = int(corr.argmax()); n = 2 * s + 1
+    k = int(corr.argmax())
+    n = 2 * s + 1
     return float(corr[k]), k // n - s, k % n - s
 
 
@@ -50,14 +60,17 @@ def saliency_map(grid_V, grid_S, surround_k: int) -> np.ndarray:
     S-mean (colorfulness) + center-surround luma contrast, z-scored and averaged, clipped
     at 0. The luma term is |V-mean - local mean| over a `surround_k` neighborhood (a box
     blur), so a cell is judged against its surround rather than the global frame mean --
-    the standard bottom-up center-surround principle. Purely per-frame; motion is separate."""
+    the standard bottom-up center-surround principle. Purely per-frame; motion is separate.
+    """
     vmean = grid_V[:, :, M_MEAN].astype(np.float32)
     v_con = np.abs(vmean - box(vmean, surround_k, surround_k))
     feats = [zscore(grid_V[:, :, M_VAR]), zscore(grid_S[:, :, M_MEAN]), zscore(v_con)]
     return np.mean(feats, axis=0).clip(min=0).astype(np.float32)
 
 
-def fine_texture(grid_V, grid_S, achromatic_w: float, coarse_k: int, line_k: int) -> np.ndarray:
+def fine_texture(
+    grid_V, grid_S, achromatic_w: float, coarse_k: int, line_k: int
+) -> np.ndarray:
     """Per-cell fine-texture energy: high-frequency within-cell contrast that is NOT
     explained by coarse between-cell variation (a multi-scale high-pass), down-weighted
     by saturation and smoothed horizontally. A generic, script-agnostic cue for text /
@@ -66,8 +79,15 @@ def fine_texture(grid_V, grid_S, achromatic_w: float, coarse_k: int, line_k: int
     also counts coarse structure."""
     fine = np.sqrt(np.maximum(grid_V[:, :, M_VAR], 0.0)).astype(np.float32)
     mean = grid_V[:, :, M_MEAN].astype(np.float32)
-    coarse = np.sqrt(np.maximum(box(mean * mean, coarse_k, coarse_k) - box(mean, coarse_k, coarse_k) ** 2, 0.0))
-    score = np.maximum(fine - coarse, 0.0) * (1.0 - achromatic_w * grid_S[:, :, M_MEAN] / 255.0)
+    coarse = np.sqrt(
+        np.maximum(
+            box(mean * mean, coarse_k, coarse_k) - box(mean, coarse_k, coarse_k) ** 2,
+            0.0,
+        )
+    )
+    score = np.maximum(fine - coarse, 0.0) * (
+        1.0 - achromatic_w * grid_S[:, :, M_MEAN] / 255.0
+    )
     return box(score, line_k, 1)
 
 
