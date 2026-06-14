@@ -1,145 +1,279 @@
-"""Live visualization of framegate on a video. Pure consumer of the public API
+"""Live dashboard for framegate on a video. Pure consumer of the public API
 (nothing here is imported by the library itself).
 
     python examples/visualize.py path/to/video.mp4
+
+Shows the appearance maps (motion / saliency / fine-texture), the exact per-cell
+moment grids, the temporal event signals (cut / fade / flicker / struct-corr),
+and a live latency panel separating framegate compute from matplotlib render --
+so the speed of the package is visible against the cost of just drawing it.
 
 Requires the [viz] extra:  pip install "framegate[viz]"
 """
 
 import sys
+import time
 from collections import deque
 
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
 from framegate import Gate
 
-HISTORY = 300        # rolling plot window (viz only)
-DISPLAY_MAX = 512    # longest side of the displayed frame
-# fixed, absolute colour ranges for the derived-map panels (display only): so a near-static
-# frame renders dark instead of auto-stretching its noise floor to full brightness.
-MAP_VMAX = {"motion": 32.0, "saliency": 3.0, "texture": 24.0}  # grey levels / z-score / texture units
-GRID_CMAPS = ["inferno", "viridis", "coolwarm", "plasma"]
-MOMENT_LBL = ["mean", "variance", "m3", "m4"]
-TS_PLOTS = [("exposure", "V mean"), ("contrast", "V std"), ("colorfulness", "S mean"),
-            ("detail", "detail"), ("struct_corr", "struct corr"), ("cut_score", "cut score"),
-            ("fade", "fade"), ("flicker", "flicker")]
+HISTORY = 300  # rolling time-series window (viz only)
+DISPLAY_MAX = 480  # longest side of the displayed frame
+LAT_WIN = 30  # frames to average for the latency readout
+# Fixed display ranges for the map panels, so a near-static frame stays dark
+# instead of auto-stretching its noise floor to full brightness.
+MAP_VMAX = {"motion": 32.0, "saliency": 3.0, "texture": 24.0}
 
 
-def _grid_row(axes, label, g):
-    ims = []
-    for ax, lbl, cmap in zip(axes, MOMENT_LBL, GRID_CMAPS):
-        im = ax.imshow(np.zeros((g, g)), cmap=cmap, aspect="auto", interpolation="nearest")
-        ax.set_title(f"{label} {lbl}", fontsize=8); ax.set_xticks([]); ax.set_yticks([])
-        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04); ims.append(im)
-    return ims
-
-
-def _imshow(ax, g, cmap, title):
+def heat(ax, title, cmap, clim=None):
     ax.set_title(title, fontsize=8)
-    return ax.imshow(np.zeros((g, g)), cmap=cmap, aspect="auto")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    im = ax.imshow(
+        np.zeros((2, 2), np.float32), cmap=cmap, aspect="auto", interpolation="nearest"
+    )
+    if clim:
+        im.set_clim(*clim)
+    return im
+
+
+def tseries(ax, title, labels, colors):
+    ax.set_title(title, fontsize=8)
+    ax.set_xlim(0, HISTORY)
+    ax.tick_params(labelsize=6)
+    lns = [
+        ax.plot(np.zeros(HISTORY), lw=1.0, color=c, label=l)[0]
+        for l, c in zip(labels, colors)
+    ]
+    if len(labels) > 1:
+        ax.legend(fontsize=6, loc="upper left", ncol=len(labels), framealpha=0.4)
+    return lns
 
 
 def run(src):
     cap = cv2.VideoCapture(src)
     assert cap.isOpened(), f"cannot open {src}"
-    sw, sh = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    sw, sh = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(
+        cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+    )
     scale = min(1.0, DISPLAY_MAX / max(sw, sh))
     W, H = max(1, int(sw * scale)), max(1, int(sh * scale))
 
     gate = Gate()
     g = gate.cfg.grid_size
-    hist = {k: deque([0.0] * HISTORY, maxlen=HISTORY) for k, _ in TS_PLOTS}
+
+    fig = plt.figure(figsize=(15, 9))
+    gs = fig.add_gridspec(
+        4, 6, hspace=0.5, wspace=0.3, left=0.04, right=0.99, top=0.93, bottom=0.05
+    )
+
+    ax_frame = fig.add_subplot(gs[0:2, 0:3])
+    ax_frame.axis("off")
+    im_frame = ax_frame.imshow(np.zeros((H, W, 3), np.uint8), aspect="auto")
+    banner = ax_frame.text(
+        0.5,
+        0.93,
+        "",
+        ha="center",
+        va="center",
+        fontsize=20,
+        fontweight="bold",
+        color="white",
+        transform=ax_frame.transAxes,
+        bbox=dict(boxstyle="round", fc="black", alpha=0.6),
+    )
+
+    # appearance maps (fixed clim, no colorbars)
+    im_mot = heat(
+        fig.add_subplot(gs[0, 3]), "motion (illum-inv)", "hot", (0, MAP_VMAX["motion"])
+    )
+    im_sal = heat(
+        fig.add_subplot(gs[0, 4]), "saliency", "magma", (0, MAP_VMAX["saliency"])
+    )
+    im_tex = heat(
+        fig.add_subplot(gs[0, 5]), "fine texture", "cividis", (0, MAP_VMAX["texture"])
+    )
+    # exact per-cell moment grids (autoscaled)
+    im_luma = heat(fig.add_subplot(gs[1, 3]), "luma  (V mean)", "inferno")
+    im_var = heat(fig.add_subplot(gs[1, 4]), "contrast  (V var)", "viridis")
+    im_sat = heat(fig.add_subplot(gs[1, 5]), "saturation  (S mean)", "plasma")
+
+    # cut-score timeline with threshold + cut markers
+    ax_cut = fig.add_subplot(gs[2, 0:3])
+    ax_cut.set_title("cut score   (threshold dotted, cut = red)", fontsize=8)
+    ax_cut.set_xlim(0, HISTORY)
+    ax_cut.tick_params(labelsize=6)
+    (ln_cut,) = ax_cut.plot(np.zeros(HISTORY), color="C3", lw=1.1)
+    ax_cut.axhline(gate.cfg.cut_dissim, color="r", ls=":", lw=0.8)
+
+    # latency timeline: framegate compute vs matplotlib render
+    ax_lat = fig.add_subplot(gs[2, 3:6])
+    ln_lat = tseries(
+        ax_lat, "framegate latency (ms/frame)", ["core", "core+maps"], ["C0", "C1"]
+    )
+
+    # temporal event signals
+    ax_ev = fig.add_subplot(gs[3, 0:2])
+    ax_ev.set_ylim(-1.05, 1.05)
+    ln_ev = tseries(
+        ax_ev, "events", ["struct_corr", "fade", "flicker"], ["C2", "C0", "C4"]
+    )
+
+    ax_txt = fig.add_subplot(gs[3, 2:6])
+    ax_txt.axis("off")
+    txt = ax_txt.text(
+        0.01,
+        0.99,
+        "",
+        va="top",
+        ha="left",
+        fontsize=9.5,
+        linespacing=1.35,
+        family="monospace",
+        transform=ax_txt.transAxes,
+    )
+
+    hist = {
+        k: deque([0.0] * HISTORY, maxlen=HISTORY)
+        for k in (
+            "cut_score",
+            "struct_corr",
+            "fade",
+            "flicker",
+            "core",
+            "maps",
+            "render",
+        )
+    }
     cut_frames = []
+    cut_lines = []
 
-    fig = plt.figure(figsize=(18, 20))
-    gs = gridspec.GridSpec(7, 4, figure=fig, hspace=0.55, wspace=0.35,
-                           left=0.05, right=0.97, top=0.94, bottom=0.04)
-    ax_frame = fig.add_subplot(gs[0, :2]); ax_frame.axis("off")
-    ax_status = fig.add_subplot(gs[0, 2:]); ax_status.axis("off")
-    gV = _grid_row([fig.add_subplot(gs[1, c]) for c in range(4)], "V", g)
-    gH = _grid_row([fig.add_subplot(gs[2, c]) for c in range(4)], "H", g)
-    gS = _grid_row([fig.add_subplot(gs[3, c]) for c in range(4)], "S", g)
-    ax_m = fig.add_subplot(gs[4, 0]); ax_s = fig.add_subplot(gs[4, 1])
-    ax_t = fig.add_subplot(gs[4, 2]); ax_tl = fig.add_subplot(gs[4, 3])
-    im_m = _imshow(ax_m, g, "hot", "motion (illum-invariant)"); im_m.set_clim(0, MAP_VMAX["motion"])
-    im_s = _imshow(ax_s, g, "magma", "saliency"); im_s.set_clim(0, MAP_VMAX["saliency"])
-    im_t = _imshow(ax_t, g, "cividis", "fine texture"); im_t.set_clim(0, MAP_VMAX["texture"])
-    ax_tl.set_title("cut score (cut = red line)", fontsize=8); ax_tl.set_xlim(0, HISTORY)
-    (ln_cs,) = ax_tl.plot(np.zeros(HISTORY), color="C3", lw=1.0)
-    ax_ts = [fig.add_subplot(gs[5 + i // 4, i % 4]) for i in range(len(TS_PLOTS))]
-
-    ret, first = cap.read()
-    disp0 = cv2.cvtColor(cv2.resize(first, (W, H)), cv2.COLOR_BGR2RGB)
-    im_frame = ax_frame.imshow(disp0, aspect="auto")
-    banner = ax_frame.text(0.5, 0.92, "", ha="center", va="center", fontsize=22, fontweight="bold",
-                           color="white", transform=ax_frame.transAxes,
-                           bbox=dict(boxstyle="round", fc="black", alpha=0.6))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-
-    lines = {}
-    for ax, (k, lbl) in zip(ax_ts, TS_PLOTS):
-        (ln,) = ax.plot(np.arange(HISTORY), np.zeros(HISTORY), lw=1.0)
-        ax.set_title(lbl, fontsize=8); ax.set_xlim(0, HISTORY); ax.tick_params(labelsize=7)
-        lines[k] = (ax, ln)
-    ax_ts[5].axhline(gate.cfg.cut_dissim, color="r", ls=":", lw=0.8)
-
-    plt.ion(); plt.show()
+    plt.ion()
+    plt.show()
     fidx = 0
     while plt.fignum_exists(fig.number):
         ret, frame = cap.read()
         if not ret:
             break
         fidx += 1
-        fs, sig = gate.frame(frame)
-        for k in hist:
-            hist[k].append(getattr(fs, k) if hasattr(fs, k) else getattr(sig, k))
+
+        t0 = time.perf_counter()
+        fs, sig = gate.frame(frame)  # core pipeline
+        t1 = time.perf_counter()
+        motion = fs.motion if fs.motion is not None else np.zeros((g, g), np.float32)
+        maps = (
+            fs.saliency,
+            fs.fine_texture,
+            motion,
+            fs.grid_V,
+            fs.grid_S,
+        )  # force lazy maps
+        scal = (
+            fs.exposure,
+            fs.contrast,
+            fs.colorfulness,
+            fs.detail,
+            fs.flat_fraction,
+            fs.noise_floor,
+            fs.clipping,
+        )  # force lazy scalars
+        t2 = time.perf_counter()
+        t_core, t_maps = (t1 - t0) * 1e3, (t2 - t1) * 1e3
+
         if sig.cut:
             cut_frames.append(fidx - 1)
 
+        # --- frame + banner ---
         im_frame.set_data(cv2.cvtColor(cv2.resize(frame, (W, H)), cv2.COLOR_BGR2RGB))
-        banner.set_text("BLANK" if fs.blank else "CUT" if sig.cut else "FREEZE" if sig.freeze else "")
+        banner.set_text(
+            "BLANK"
+            if fs.blank
+            else "CUT" if sig.cut else "FREEZE" if sig.freeze else ""
+        )
 
-        ax_status.clear(); ax_status.axis("off")
-        ax_status.text(0.5, .82, "BLANK" if fs.blank else "active", ha="center",
-                       color="tomato" if fs.blank else "limegreen", fontsize=16, fontweight="bold")
-        ax_status.text(0.5, .58, f"corr={sig.struct_corr:.3f}   gain={sig.gain:.2f}   bias={sig.bias:+.1f}",
-                       ha="center", fontsize=10, color="gray")
-        ax_status.text(0.5, .43, f"cut_score={sig.cut_score:.3f}   fade={sig.fade:+.2f}   flicker={sig.flicker:.2f}",
-                       ha="center", fontsize=10, color="gray")
-        ax_status.text(0.5, .28, f"noise={fs.noise_floor:.2f}   clip={fs.clipping:+.2f}   colorful={fs.colorfulness:.1f}",
-                       ha="center", fontsize=10, color="gray")
+        # --- maps (fixed clim) + grids (autoscaled) ---
+        im_mot.set_data(motion)
+        im_sal.set_data(fs.saliency)
+        im_tex.set_data(fs.fine_texture)
+        for im, d in (
+            (im_luma, fs.grid_V[:, :, 0]),
+            (im_var, fs.grid_V[:, :, 1]),
+            (im_sat, fs.grid_S[:, :, 0]),
+        ):
+            im.set_data(d)
+            im.set_clim(float(d.min()), float(d.max()) + 1e-6)
 
-        for ims, ch in ((gV, "grid_V"), (gH, "grid_H"), (gS, "grid_S")):
-            chan = getattr(fs, ch)
-            for i, im in enumerate(ims):
-                d = chan[:, :, i]; im.set_data(d); im.set_clim(d.min(), d.max() + 1e-6)
-        g_z = np.zeros((g, g), np.float32)
-        for im, d in ((im_m, fs.motion if fs.motion is not None else g_z),
-                      (im_s, fs.saliency), (im_t, fs.fine_texture)):
-            im.set_data(d)                              # fixed absolute clim set at setup
+        # --- histories ---
+        for k, v in (
+            ("cut_score", sig.cut_score),
+            ("struct_corr", sig.struct_corr),
+            ("fade", sig.fade),
+            ("flicker", sig.flicker),
+            ("core", t_core),
+            ("maps", t_core + t_maps),
+        ):
+            hist[k].append(v)
 
-        cs = np.asarray(hist["cut_score"]); ln_cs.set_ydata(cs)
-        ax_tl.set_ylim(0, max(cs.max(), gate.cfg.cut_dissim) * 1.1 + 1e-3)
-        [c.remove() for c in list(ax_tl.lines[1:])]
+        cs = np.asarray(hist["cut_score"])
+        ln_cut.set_ydata(cs)
+        ax_cut.set_ylim(0, max(cs.max(), gate.cfg.cut_dissim) * 1.1 + 1e-3)
+        for c in cut_lines:
+            c.remove()
+        cut_lines = []
         origin = fidx - HISTORY + 1
         for f in cut_frames:
             if origin <= f <= fidx:
-                ax_tl.axvline(f - origin, color="red", lw=1.0, alpha=.7)
-        for k, (ax, ln) in lines.items():
-            d = np.asarray(hist[k]); ln.set_ydata(d)
-            lo, hi = d.min(), d.max(); ax.set_ylim(lo - max((hi - lo) * .1, .05), hi + max((hi - lo) * .1, .05))
+                cut_lines.append(
+                    ax_cut.axvline(f - origin, color="red", lw=1.0, alpha=0.7)
+                )
 
-        fig.suptitle(f"frame {fidx}  |  {src}", fontsize=10)
-        fig.canvas.draw_idle(); fig.canvas.flush_events()
+        for ln, k in zip(ln_ev, ("struct_corr", "fade", "flicker")):
+            ln.set_ydata(hist[k])
+        for ln, k in zip(ln_lat, ("core", "maps")):
+            ln.set_ydata(hist[k])
+        a_core = np.mean(list(hist["core"])[-LAT_WIN:])
+        a_full = np.mean(list(hist["maps"])[-LAT_WIN:])  # maps history holds core+maps
+        ax_lat.set_ylim(0, max(hist["maps"]) * 1.3 + 0.1)
 
-    cap.release(); plt.ioff(); plt.show()
+        # render time (previous frame's, measured below) feeds its own line
+        # --- status text ---
+        state = (
+            "BLANK"
+            if fs.blank
+            else ("CUT" if sig.cut else ("FREEZE" if sig.freeze else "active"))
+        )
+        txt.set_text(
+            f"state      {state}\n"
+            f"compute    {a_full:5.2f} ms   ({1000 / max(a_full, 1e-6):4.0f} fps)\n"
+            f"  core     {a_core:5.2f} ms   + maps {a_full - a_core:4.2f}\n"
+            f"  render   {np.mean(list(hist['render'])[-LAT_WIN:]):5.2f} ms   (matplotlib)\n"
+            f"cut_score  {sig.cut_score:5.3f}   corr {sig.struct_corr:+.3f}\n"
+            f"gain/bias  {sig.gain:5.2f} / {sig.bias:+.1f}\n"
+            f"fade/flick {sig.fade:+.2f} / {sig.flicker:.2f}\n"
+            f"exposure   {fs.exposure:5.1f}   contrast {fs.contrast:5.1f}\n"
+            f"colorful   {fs.colorfulness:5.1f}   detail   {fs.detail:5.2f}\n"
+            f"noise/clip {fs.noise_floor:5.2f} / {fs.clipping:+.2f}\n"
+            f"flat_frac  {fs.flat_fraction:5.2f}"
+        )
+
+        fig.suptitle(f"framegate   |   frame {fidx}   |   {src}", fontsize=11)
+        tr = time.perf_counter()
+        fig.canvas.draw_idle()
+        fig.canvas.flush_events()
+        t_render = (time.perf_counter() - tr) * 1e3
+        hist["render"].append(t_render)
+
+    cap.release()
+    plt.ioff()
     print(f"done. {fidx} frames.")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("usage: python examples/visualize.py <video.mp4>"); sys.exit(1)
+        print("usage: python examples/visualize.py <video.mp4>")
+        sys.exit(1)
     run(sys.argv[1])
