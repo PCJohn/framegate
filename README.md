@@ -6,7 +6,8 @@ or video frame to get cheap, broadly-useful signals, then let a heavy model
 
 It is deliberately *generic*: no task-specific heuristics, no per-dataset tuning.
 Everything is derived from cheap per-cell colour/luma statistics computed on a small
-thumbnail, so a single call costs roughly 0.5-2 ms on a 1080p frame (hardware-dependent).
+thumbnail, so a single call costs about 1.5-2 ms on a 1080p frame on a modern laptop --
+and tunes down to well under 1 ms when you need it (hardware-dependent; see Performance).
 
 ```python
 from framegate import Gate
@@ -54,6 +55,55 @@ that's the "use whichever parts apply" behaviour, for free.
 Signals are **lazy properties**: you pay only for the ones you read. Reading
 `stats.exposure` costs nothing extra; the saliency/fine_texture/motion arrays are computed
 only on access.
+
+**Under the hood.** Every signal is derived from **exact per-cell central moments**
+(mean, variance, and two higher moments) of the H/S/V channels, computed over a
+`thumb`x`thumb` thumbnail in a single pass by
+[`tensorstats`](https://github.com/PCJohn/tensorstats). The thumbnail is divided into a
+`GxG` grid of cells (`G = 2**grid_exp`, default 32); each cell's moments summarize its
+colour and texture, and the signals are cheap combinations of them. The grid is also
+computed at several coarser resolutions in the *same* pass -- a dyadic **pyramid** of
+`n_levels` (default 4: 32 -> 16 -> 8 -> 4). Today the signals read only the finest level;
+the coarser levels are plumbing for upcoming multi-scale signals, so **set `n_levels=1`
+to skip them** (~0.5 ms cheaper) until you need them.
+
+## Recommended usage
+
+The gate is a cheap front door: run it on every frame, then spend real compute only where
+and when it says to.
+
+1. **One `Gate` per stream, constructed once.** It owns the scratch buffers and the
+   temporal state. Not thread-safe -- use one `Gate` per thread.
+2. **Branch on the cheap signals before the expensive model:**
+   - `stats.blank` -> skip the frame entirely.
+   - `sig.cut` -> reset shot-level state (re-key a tracker, start a new segment).
+   - `sig.freeze` -> reuse the previous heavy result; the frame didn't change.
+   - otherwise -> run your model, optionally only on high-`saliency` / high-`motion` cells.
+3. **Reuse the work the gate already did.** With `return_frames=True` (default) the resized
+   thumbnail and HSV are on `stats.thumb` / `stats.hsv` -- pass them downstream instead of
+   resizing again. Set it `False` if you don't, to save the copy.
+4. **For steady latency, disable the GC around your loop.** GC pauses -- not framegate --
+   are the main source of latency *spikes*; `gc.disable()` plus a periodic `gc.collect()`
+   flattens the tail.
+5. **Tune to your budget with `thumb` first, then `stride`** (see [Performance](#performance)).
+
+```python
+import gc
+from framegate import Gate
+
+gate = Gate()
+gc.disable()
+for i, frame in enumerate(stream):
+    stats, sig = gate.frame(frame)
+    if i % 500 == 0:
+        gc.collect()                          # bounded manual reap
+    if stats.blank or sig.freeze:
+        continue                              # nothing worth running a model on
+    if sig.cut:
+        tracker.reset()                       # shot boundary
+    regions = pick_cells(stats.saliency, stats.motion)   # your ROI policy
+    run_model(stats.thumb, regions)           # reuse the thumbnail the gate made
+```
 
 ## Signals
 
@@ -202,8 +252,9 @@ gains a float32 output mode, that copy disappears.
 
 By design, no optimization changes any output:
 
-- **Blank → skip FAST.** A statistically flat frame has no corners, so the corner
-  check is skipped. Bit-exact.
+- **Blank -> skip FAST.** A statistically flat frame has no corners, so the corner
+  check is skipped. The check itself runs on a `fast_thumb` subsample of the luma (the
+  blank decision only needs corner *presence*, not full resolution). Bit-exact.
 - **Duplicate → reuse stats.** Byte-identical consecutive frames reuse the previous
   result (identical input ⇒ identical stats), gated by a cheap strided pre-check so
   distinct frames pay only microseconds. Toggle with `skip_duplicates`.
