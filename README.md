@@ -224,39 +224,71 @@ inert on high-motion frames; set `fast_static=False` for strict bit-exactness.
 
 ## Performance
 
-Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time).
+Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time)
+with the **default config** (`thumb=256`, `grid_exp=5`, a 4-level pyramid, `stride=2`).
 Absolute numbers scale with CPU clock; the *shape* is consistent across machines.
 
-| Path                                  | Apple M-series | Linux x86 (slow box) |
-|---------------------------------------|----------------|----------------------|
-| `image()` (stateless)                 | ~0.35 ms       | ~0.8 ms              |
-| `frame()` (temporal)                  | ~0.6 ms        | ~1.5 ms              |
-| `frame()` + all maps read             | ~0.7 ms        | ~1.7 ms              |
-| `frame()` on 50% duplicates           | ~0.5 ms        | ~1.5 ms              |
+| Path                          | laptop (charged) | Linux x86 (slow box) |
+|-------------------------------|------------------|----------------------|
+| `image()` (stateless)         | ~1.4 ms          | ~3.3 ms              |
+| `frame()` (temporal)          | ~1.9 ms          | ~4.0 ms              |
+| `frame()` + all maps read     | ~2.0 ms          | ~4.2 ms              |
+| `frame()` on 50% duplicates   | ~1.4 ms          | ~2.9 ms              |
 
-What moves the number, from `examples/benchmark.py` (size / grid / stride / thumb sweeps;
-figures below are from Apple silicon):
+What moves the number, from `examples/benchmark.py` (figures below are the charged laptop):
 
-- **`thumb` dominates** — it sets the pixel work: `thumb=64` ≈ 0.12 ms, `128` (default)
-  ≈ 0.35 ms, `256` ≈ 1.25 ms. This is the first knob to reach for.
+- **`thumb` dominates** — it sets the pixel work and scales ~quadratically with it:
+  `thumb=64` ≈ 0.14 ms, `128` ≈ 0.57 ms, `192` ≈ 1.19 ms, `256` (default) ≈ 1.44 ms.
+  This is the first knob to reach for.
 - **Input resolution barely matters** for `image()` (everything downsizes to `thumb`
-  first): ~0.32 ms at 360p rising to only ~0.37 ms at 4K. Larger frames cost more only in
-  the resize, seen mainly in `frame()` (~0.5 ms → ~0.8 ms at 4K).
-- **`stride=1` hits tensorstats' uint8 fast path**, so it beats `stride=2` (the general
-  path on the same data, ~0.39 vs ~0.35 ms); higher strides subsample more so can be faster
-  still but coarsen the stats. Leave stride at 1 unless profiling says otherwise.
-- **`grid_exp` scales gently**: 16×16 and 32×32 ≈ 0.35 ms, 64×64 ≈ 0.38 ms.
+  first): ~1.41 ms at 360p rising to only ~1.54 ms at 4K. Larger frames cost more only in
+  the resize, seen mainly in `frame()` (~1.7 ms → ~2.2 ms at 4K). No need to pre-downscale.
+- **`stride` is the second lever:** `stride=1` ≈ 2.32 ms, `2` (default) ≈ 1.44 ms,
+  `3` ≈ 1.02 ms, `4` ≈ 0.81 ms. Note `stride>1` is *not* a uint8 fast path — it switches
+  tensorstats' grid path to an indexed gather over subsampled pixels. For a single grid that
+  gather can cost more than it saves below ~4x, but with the multi-level pyramid the
+  per-pixel scatter into every level dominates, so `stride=2` beats `stride=1` (hence the
+  default). Higher strides subsample more, so they coarsen the per-cell stats and need
+  `cell_px / stride >= 2`.
+- **`n_levels` (pyramid depth):** each coarse level adds ~0.15 ms of per-pixel scatter
+  (`n_levels=1` ≈ 0.99 ms → `4` ≈ 1.45 ms). The coarse levels are nearly free in *passes*
+  but not in compute; request only as many as your signals read.
+- **`grid_exp` scales gently:** 16×16 ≈ 1.34 ms, 32×32 ≈ 1.44 ms, 64×64 ≈ 1.64 ms.
+  `grid_exp=7` (128×128) exceeds tensorstats' int16 cell limit.
 
 The heavy pixel work (moments, FAST) is native; the rest is small-array numpy. Buffers are
 preallocated and reused, work is float32, the rolling baseline uses a sort instead of
 `np.median`, derived maps are cached, and all array outputs are lazy.
 
-A measurement note: these are small-array ops, so OpenCV's default multithreading can add
-scheduling variance at this size (most visible in the grid/stride micro-sweeps on many-core
-machines, where it can briefly invert their tiny orderings). `cv2.setNumThreads(1)` usually
-steadies — and sometimes slightly speeds — them. framegate does not set it globally, since a
-library shouldn't mutate process-wide state; the benchmark also interleaves its sweeps so
-clock drift is spread evenly across configs rather than penalizing whichever ran during a dip.
+### Tuning for latency
+
+Practical levers, fastest path to a smaller number first:
+
+- **Drop `thumb`.** It is by far the biggest dial. `thumb=128` roughly halves the default
+  cost; `thumb=64` is ~10x cheaper. Raise it only when you need richer per-cell statistics
+  (more pixels per cell). At `thumb=256`/`grid_exp=5` each finest cell sees 64 px at
+  `stride=1`, 16 at `stride=2`.
+- **Use `stride` to bound cost at a large `thumb`,** accepting coarser stats — but remember
+  it is a gather, so small strides may not pay off for a single grid.
+- **Trim `n_levels`** to what your signals actually consume; every extra level is scatter
+  work on every pixel.
+- **Set `return_frames=False`** if you never read `fs.thumb` / `fs.hsv`. The default
+  attaches fresh thumbnail + HSV arrays to every `FrameStats` (two allocations/frame, ~384
+  KB at `thumb=256`); turning it off reuses internal scratch and cuts that allocation.
+- **Leave `skip_duplicates=True`** (default). Byte-identical consecutive frames reuse the
+  previous result behind a cheap strided pre-check — near-free on slideshows, padded streams,
+  or held frames.
+- **Read signals lazily.** `FrameStats` maps and scalars compute on first access and cache.
+  If you only need the cut decision, don't touch `fs.saliency` / `fs.fine_texture` /
+  `fs.motion` — that is the ~0.15 ms gap between `frame()` and `frame() + all maps`.
+- **Disable the garbage collector around your loop.** GC pauses are the dominant source of
+  latency *spikes* (not the steady cost): `gc.disable()` before the loop with a periodic
+  `gc.collect()` flattens the tail. `examples/visualize.py` shows the pattern.
+- **Consider `cv2.setNumThreads(1)`.** These are small-array ops, so OpenCV's default
+  multithreading can add scheduling variance (most visible in the micro-sweeps on many-core
+  machines). Pinning to one thread usually steadies — and sometimes slightly speeds — them.
+  The library never sets this globally, since a library shouldn't mutate process-wide state;
+  the benchmark interleaves its sweeps so clock drift is spread evenly across configs.
 
 ## Project layout
 
