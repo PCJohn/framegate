@@ -22,10 +22,15 @@ class FrameStats:
     Signals are lazy properties, so callers pay only for what they read."""
 
     chan: np.ndarray  # (3, 4) per-channel H/S/V moments
-    grid: np.ndarray  # (G, G, C, 4) [row, col, channel, moment]
+    grid: (
+        np.ndarray
+    )  # (G, G, C, 4) [row, col, channel, moment] -- finest level (== grids[0])
     blank: bool
     shape: tuple  # source (H, W), so spatial outputs map to pixels
     cfg: GateConfig
+    grids: (
+        tuple
+    ) = ()  # pyramid levels finest->coarsest, each (G_k, G_k, C, 4); grids[0] is grid
     thumb: Optional[np.ndarray] = (
         None  # resized input (BGR or gray), if cfg.return_frames
     )
@@ -159,7 +164,7 @@ class FrameGate:
             shape=(t, t, 3),
             axes=[(0, 1)],
             stride=(self.cfg.stride, self.cfg.stride, 1),
-            grid=(self.cfg.grid_exp, self.cfg.grid_exp, 2),
+            grid=[(e, e, 2) for e in self.cfg.pyramid_exps],
         )
         self._bgr = np.empty(
             (t, t, 3), np.uint8
@@ -195,17 +200,30 @@ class FrameGate:
         hsv, thumb = self._to_hsv(frame, keep)
         r = self._stats.compute(hsv)
         chan = r["0,1"].astype(np.float32)
-        grid = r["grid_0"].astype(np.float32)
+        grids = tuple(
+            r[f"grid_{i}"].astype(np.float32) for i in range(self.cfg.n_levels)
+        )
+        grid = grids[
+            0
+        ]  # finest = output-map resolution; coarser levels feed multi-scale signals
 
         # Lossless: a stats-flat frame has no FAST corners, so skip the detector.
+        # FAST is only the blank check, so run it on a cheaper subsample of V.
+        step = max(1, self.cfg.thumb // self.cfg.fast_thumb)
+        vch = (
+            hsv[:, :, S.CH_V]
+            if step == 1
+            else np.ascontiguousarray(hsv[::step, ::step, S.CH_V])
+        )
         blank = (
             float(grid[:, :, S.CH_V, S.M_VAR].max()) < self.cfg.solid_thresh
-            or len(self._fast.detect(hsv[:, :, S.CH_V], None)) == 0
+            or len(self._fast.detect(vch, None)) == 0
         )
 
         return FrameStats(
             chan=chan,
             grid=grid,
+            grids=grids,
             blank=blank,
             shape=(h, w),
             cfg=self.cfg,

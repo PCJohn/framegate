@@ -21,9 +21,17 @@ import yaml
 @dataclass(frozen=True)
 class GateConfig:
     # --- frame extraction ---
-    thumb: int = 128  # thumbnail side for stats + FAST
-    stride: int = 1  # tensorstats stride (1 hits the uint8 fast path)
-    grid_exp: int = 5  # 2^grid_exp cells per dim (5 -> 32x32)
+    thumb: int = 256  # thumbnail side for stats + FAST
+    stride: int = (
+        2  # tensorstats grid stride; >1 = indexed-gather over subsampled pixels
+    )
+    fast_thumb: int = 128  # resolution for the FAST blank-check (subsampled from thumb)
+    grid_exp: int = (
+        5  # 2^grid_exp cells per dim (5 -> 32x32); finest / output-map level
+    )
+    n_levels: int = (
+        4  # dyadic pyramid levels, coarsening from grid_exp (5,4,3,2 -> 32..4)
+    )
     fast_thresh: int = 10  # FAST corner threshold (tier-2 blank check)
     solid_thresh: float = 1.0  # blank if max V cell-variance < this
 
@@ -83,6 +91,18 @@ class GateConfig:
     @property
     def grid_size(self) -> int:
         return 2**self.grid_exp
+
+    @property
+    def pyramid_exps(self) -> list:
+        """Per-level spatial cell-exponents, finest->coarsest: [grid_exp .. grid_exp-n_levels+1].
+        Level 0 is the finest (output-map) grid; coarser levels feed multi-scale signals.
+        """
+        exps = [self.grid_exp - i for i in range(self.n_levels)]
+        if exps[-1] < 0:
+            raise ValueError(
+                f"n_levels={self.n_levels} too deep for grid_exp={self.grid_exp}"
+            )
+        return exps
 
     @classmethod
     def from_yaml(cls, path=None, **overrides) -> "GateConfig":

@@ -12,7 +12,7 @@ import pytest
 
 from framegate import Gate
 
-BUDGET_MS = 8.0   # generous; real hardware is far under this
+BUDGET_MS = 8.0  # generous; real hardware is far under this
 
 
 def _bench(fn, frames, warmup=8, repeats=5):
@@ -58,7 +58,9 @@ def test_frame_with_maps_under_budget(frames_1080p, capsys):
 
     def read_maps(f):
         fs, _ = g.frame(f)
-        fs.saliency; fs.fine_texture; _ = fs.motion
+        fs.saliency
+        fs.fine_texture
+        _ = fs.motion
 
     ms = _bench(read_maps, frames_1080p)
     with capsys.disabled():
@@ -67,7 +69,7 @@ def test_frame_with_maps_under_budget(frames_1080p, capsys):
 
 
 def test_duplicate_skip_is_not_slower(frames_1080p, capsys):
-    dup = [f for f in frames_1080p[:30] for _ in range(2)]   # every frame repeated
+    dup = [f for f in frames_1080p[:30] for _ in range(2)]  # every frame repeated
     g = Gate()
     ms = _bench(lambda f: g.frame(f), dup)
     with capsys.disabled():
