@@ -67,7 +67,10 @@ def _frames_from_video(path, n=300):
 def _read_maps(g):
     def f(frame):
         fs, _ = g.frame(frame)
-        fs.saliency; fs.fine_texture; _ = fs.motion
+        fs.saliency
+        fs.fine_texture
+        _ = fs.motion
+
     return f
 
 
@@ -86,21 +89,29 @@ def _cfg_items(specs, frames):
     for label, cfg in specs:
         try:
             g = Gate(cfg)
-        except RuntimeError as e:
+        except (RuntimeError, ValueError) as e:
             print(f"  {label:36s} unsupported ({str(e).split(':')[-1].strip()})")
             continue
         items.append((label, (lambda gg: lambda f: gg.image(f))(g), frames))
     return items
 
 
-RESOLUTIONS = [("360p", 360, 640), ("480p", 480, 854), ("720p", 720, 1280),
-               ("1080p", 1080, 1920), ("1440p", 1440, 2560), ("2160p/4K", 2160, 3840)]
+RESOLUTIONS = [
+    ("360p", 360, 640),
+    ("480p", 480, 854),
+    ("720p", 720, 1280),
+    ("1080p", 1080, 1920),
+    ("1440p", 1440, 2560),
+    ("2160p/4K", 2160, 3840),
+]
 
 
 def run_synthetic():
     print("framegate benchmark")
-    print(f"  platform: {platform.system()} {platform.machine()} | python {platform.python_version()} "
-          f"| numpy {np.__version__} | cv2 {cv2.__version__} (threads={cv2.getNumThreads()})")
+    print(
+        f"  platform: {platform.system()} {platform.machine()} | python {platform.python_version()} "
+        f"| numpy {np.__version__} | cv2 {cv2.__version__} (threads={cv2.getNumThreads()})"
+    )
     print("  timing: min / median ms per frame, GC off, sweeps interleaved\n")
 
     frames = _synthetic(120, 1080, 1920)
@@ -108,45 +119,88 @@ def run_synthetic():
     _header("[1] 1080p summary (default config)")
     gi, gv, gm, gd = Gate(), Gate(), Gate(), Gate()
     dup = [x for x in frames[:60] for _ in range(2)]
-    res = _bench_group([
-        ("image()  (stateless)", lambda f: gi.image(f), frames),
-        ("frame()  (temporal)", lambda f: gv.frame(f), frames),
-        ("frame()  + all maps read", _read_maps(gm), frames),
-        ("frame()  on 50% duplicates", lambda f: gd.frame(f), dup),
-    ])
-    for label in ["image()  (stateless)", "frame()  (temporal)",
-                  "frame()  + all maps read", "frame()  on 50% duplicates"]:
+    res = _bench_group(
+        [
+            ("image()  (stateless)", lambda f: gi.image(f), frames),
+            ("frame()  (temporal)", lambda f: gv.frame(f), frames),
+            ("frame()  + all maps read", _read_maps(gm), frames),
+            ("frame()  on 50% duplicates", lambda f: gd.frame(f), dup),
+        ]
+    )
+    for label in [
+        "image()  (stateless)",
+        "frame()  (temporal)",
+        "frame()  + all maps read",
+        "frame()  on 50% duplicates",
+    ]:
         _print(label, res[label])
 
-    _header("[2] input-size sweep (default grid 32, stride 1)")
+    _header("[2] input-size sweep (default config: grid 32, 4-level pyramid, stride 2)")
     # measured per-resolution (frames freed between) so 4K doesn't blow up memory; the
     # cross-resolution signal is large, so sequential measurement is fine here
     for name, h, w in RESOLUTIONS:
         fr = _synthetic(60 if h >= 1440 else 120, h, w)
         gi2, gf2 = Gate(), Gate()
-        r = _bench_group([("image", lambda f, g=gi2: g.image(f), fr),
-                          ("frame", lambda f, g=gf2: g.frame(f), fr)])
+        r = _bench_group(
+            [
+                ("image", lambda f, g=gi2: g.image(f), fr),
+                ("frame", lambda f, g=gf2: g.frame(f), fr),
+            ]
+        )
         mi, mf = r["image"][0], r["frame"][0]
-        print(f"  {name:10s} {w}x{h:<6d}  image {mi:6.3f} ms ({1000/mi:5.0f} fps)   "
-              f"frame {mf:6.3f} ms ({1000/mf:5.0f} fps)")
+        print(
+            f"  {name:10s} {w}x{h:<6d}  image {mi:6.3f} ms ({1000/mi:5.0f} fps)   "
+            f"frame {mf:6.3f} ms ({1000/mf:5.0f} fps)"
+        )
         del fr
 
-    _header("[3] grid-size sweep (1080p, stride 1)  -- grid = 2**grid_exp cells/dim")
+    _header(
+        "[3] grid-size sweep (1080p, default stride 2)  -- grid = 2**grid_exp cells/dim"
+    )
     # grid_exp 7 (128x128) exceeds tensorstats' int16 cell limit
-    res = _bench_group(_cfg_items(
-        [(f"grid_exp={ge}  ({2**ge}x{2**ge} cells)", GateConfig(grid_exp=ge)) for ge in (4, 5, 6)], frames))
+    res = _bench_group(
+        _cfg_items(
+            [
+                (f"grid_exp={ge}  ({2**ge}x{2**ge} cells)", GateConfig(grid_exp=ge))
+                for ge in (4, 5, 6)
+            ],
+            frames,
+        )
+    )
     for label in res:
         _print(label, res[label])
 
     _header("[4] stride sweep (1080p, grid 32)  -- tensorstats subsampling")
-    res = _bench_group(_cfg_items(
-        [(f"stride={st}", GateConfig(stride=st)) for st in (1, 2, 3, 4)], frames))
+    res = _bench_group(
+        _cfg_items(
+            [(f"stride={st}", GateConfig(stride=st)) for st in (1, 2, 3, 4)], frames
+        )
+    )
     for label in res:
         _print(label, res[label])
 
-    _header("[5] thumb-size sweep (1080p, grid 32, stride 1)")
-    res = _bench_group(_cfg_items(
-        [(f"thumb={tb}", GateConfig(thumb=tb)) for tb in (64, 96, 128, 192, 256)], frames))
+    _header("[5] thumb-size sweep (1080p, grid 32, default stride 2)")
+    res = _bench_group(
+        _cfg_items(
+            [(f"thumb={tb}", GateConfig(thumb=tb)) for tb in (64, 96, 128, 192, 256)],
+            frames,
+        )
+    )
+    for label in res:
+        _print(label, res[label])
+
+    _header(
+        "[6] pyramid-depth sweep (1080p, grid 32, stride 2)  -- n_levels = grids per pass"
+    )
+    res = _bench_group(
+        _cfg_items(
+            [
+                (f"n_levels={nl}  (32..{2**(5 - nl + 1)})", GateConfig(n_levels=nl))
+                for nl in (1, 2, 3, 4)
+            ],
+            frames,
+        )
+    )
     for label in res:
         _print(label, res[label])
 
@@ -154,15 +208,23 @@ def run_synthetic():
 def run_video(path):
     frames = _frames_from_video(path)
     print(f"framegate benchmark on {len(frames)} frames from {path}")
-    print(f"  resolution {frames[0].shape[1]}x{frames[0].shape[0]} "
-          f"| cv2 threads={cv2.getNumThreads()} | timing min / median, GC off\n")
+    print(
+        f"  resolution {frames[0].shape[1]}x{frames[0].shape[0]} "
+        f"| cv2 threads={cv2.getNumThreads()} | timing min / median, GC off\n"
+    )
     gi, gv, gm = Gate(), Gate(), Gate()
-    res = _bench_group([
-        ("image()  (stateless)", lambda f: gi.image(f), frames),
-        ("frame()  (temporal)", lambda f: gv.frame(f), frames),
-        ("frame()  + all maps read", _read_maps(gm), frames),
-    ])
-    for label in ["image()  (stateless)", "frame()  (temporal)", "frame()  + all maps read"]:
+    res = _bench_group(
+        [
+            ("image()  (stateless)", lambda f: gi.image(f), frames),
+            ("frame()  (temporal)", lambda f: gv.frame(f), frames),
+            ("frame()  + all maps read", _read_maps(gm), frames),
+        ]
+    )
+    for label in [
+        "image()  (stateless)",
+        "frame()  (temporal)",
+        "frame()  + all maps read",
+    ]:
         _print(label, res[label])
 
 

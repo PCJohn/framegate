@@ -29,18 +29,19 @@ def box(x: np.ndarray, kx: int, ky: int) -> np.ndarray:
     )
 
 
+def ncc0(prev: np.ndarray, cur: np.ndarray) -> float:
+    """Zero-shift normalized cross-correlation of two equal-shape maps."""
+    a, b = prev - prev.mean(), cur - cur.mean()
+    return float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-6))
+
+
 def best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
     """argmax normalized cross-correlation of cur's center vs prev over +/-s
     integer cell shifts (square maps), so a camera pan (a translation of the map)
     still correlates highly and isn't read as a cut. Returns (corr, dy, dx),
     vectorized over all (2s+1)^2 shifts via a sliding-window view."""
     if s <= 0:
-        a, b = prev - prev.mean(), cur - cur.mean()
-        return (
-            float((a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-6)),
-            0,
-            0,
-        )
+        return ncc0(prev, cur), 0, 0
     g = prev.shape[-1]
     h = g - 2 * s
     c = cur[s : s + h, s : s + h]

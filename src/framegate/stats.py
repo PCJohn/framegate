@@ -171,6 +171,11 @@ class FrameGate:
         )  # scratch reused when not returning frames
         self._gray = np.empty((t, t), np.uint8)
         self._hsv = np.empty((t, t, 3), np.uint8)
+        # FAST runs on a subsample of V; precompute the step + a reusable buffer.
+        self._fast_step = max(1, t // self.cfg.fast_thumb)
+        if self._fast_step > 1:
+            n = len(range(0, t, self._fast_step))
+            self._vfast = np.empty((n, n), np.uint8)
 
     def _to_hsv(self, frame: np.ndarray, keep: bool):
         """Resize to the thumbnail and produce HSV. Grayscale becomes H=S=0, V=luma,
@@ -209,12 +214,11 @@ class FrameGate:
 
         # Lossless: a stats-flat frame has no FAST corners, so skip the detector.
         # FAST is only the blank check, so run it on a cheaper subsample of V.
-        step = max(1, self.cfg.thumb // self.cfg.fast_thumb)
-        vch = (
-            hsv[:, :, S.CH_V]
-            if step == 1
-            else np.ascontiguousarray(hsv[::step, ::step, S.CH_V])
-        )
+        if self._fast_step == 1:
+            vch = hsv[:, :, S.CH_V]
+        else:
+            self._vfast[:] = hsv[:: self._fast_step, :: self._fast_step, S.CH_V]
+            vch = self._vfast
         blank = (
             float(grid[:, :, S.CH_V, S.M_VAR].max()) < self.cfg.solid_thresh
             or len(self._fast.detect(vch, None)) == 0

@@ -115,10 +115,7 @@ class StreamAnalyzer:
         if min(float(prev.std()), float(cur.std())) < c.ncc_flattol:
             return 1.0
         if c.fast_static:
-            a, b = prev - prev.mean(), cur - cur.mean()
-            corr0 = float(
-                (a * b).sum() / (np.sqrt((a * a).sum() * (b * b).sum()) + 1e-6)
-            )
+            corr0 = S.ncc0(prev, cur)
             if corr0 >= c.static_corr:
                 return corr0
         return S.best_shift(prev, cur, c.shift_search)[0]
