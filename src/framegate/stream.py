@@ -142,10 +142,10 @@ class StreamAnalyzer:
             self._idx_prev = self._idx
             return TemporalSignals.none()
 
-        a, b, resid = self._affine(self._prev_luma.ravel(), luma.ravel())
+        a, b, resid = self._affine(self._prev_luma, luma)  # 2-D, no ravel copies
         resid_rms = float(np.sqrt((resid**2).mean()))
         dV = V - self._prev_V
-        fs.residual = resid.reshape(luma.shape)  # annotate the frame with its motion
+        fs.residual = resid  # already (G,G); annotate the frame with its motion
 
         cut_score, luma_corr = self._cut_score(
             self._prev_luma, self._prev_color, luma, color

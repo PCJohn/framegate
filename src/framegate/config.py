@@ -22,16 +22,10 @@ import yaml
 class GateConfig:
     # --- frame extraction ---
     thumb: int = 256  # thumbnail side for stats + FAST
-    stride: int = (
-        2  # tensorstats grid stride; >1 = indexed-gather over subsampled pixels
-    )
+    stride: int = 2  # grid stride; >1 = indexed-gather over a subsample
     fast_thumb: int = 128  # resolution for the FAST blank-check (subsampled from thumb)
-    grid_exp: int = (
-        5  # 2^grid_exp cells per dim (5 -> 32x32); finest / output-map level
-    )
-    n_levels: int = (
-        4  # dyadic pyramid levels, coarsening from grid_exp (5,4,3,2 -> 32..4)
-    )
+    grid_exp: int = 5  # 2^grid_exp cells/dim (5 -> 32x32); output/finest level
+    n_levels: int = 4  # dyadic pyramid levels from grid_exp (5,4,3,2 -> 32..4)
     fast_thresh: int = 10  # FAST corner threshold (tier-2 blank check)
     solid_thresh: float = 1.0  # blank if max V cell-variance < this
 
@@ -40,15 +34,9 @@ class GateConfig:
     cut_w_luma: float = 1.0  # weight of the luma-structure path
     cut_w_color: float = 1.0  # weight of the global colour-shift path
     ncc_flattol: float = 1.0  # luma std below this -> no structure, skip luma path
-    color_maxd: float = (
-        2.0  # max normalized chroma-vector distance (scales colour path)
-    )
-    fast_static: bool = (
-        True  # skip the shift search when zero-shift corr is already this high
-    )
-    static_corr: float = (
-        0.98  # (effectively lossless: only fires when motion can't change the cut)
-    )
+    color_maxd: float = 2.0  # max normalized chroma-vector distance (colour path)
+    fast_static: bool = True  # skip shift search when zero-shift corr already high
+    static_corr: float = 0.98  # lossless: only fires when motion can't change the cut
 
     # --- cut decision ---
     roll_win: int = 20  # rolling window for robust (median+MAD) scoring
@@ -72,18 +60,12 @@ class GateConfig:
     sal_surround: int = 7  # neighborhood (cells) for the center-surround luma contrast
 
     # --- motion map ---
-    motion_floor_k: float = (
-        1.0  # subtract k * local-mean|residual| as the noise floor (0 = off)
-    )
+    motion_floor_k: float = 1.0  # k*local-mean|residual| noise floor (0 = off)
     motion_surround: int = 7  # neighborhood (cells) for that local floor
-    motion_abs_floor: float = (
-        1.0  # also subtract at least this many grey levels (0 = off); both 0 = raw |residual|
-    )
+    motion_abs_floor: float = 1.0  # absolute grey-level floor (0 = off)
 
     # --- output ---
-    return_frames: bool = (
-        True  # attach the thumbnail + HSV to FrameStats for the caller to reuse
-    )
+    return_frames: bool = True  # attach thumb+HSV to FrameStats for caller reuse
 
     # --- video-level optimization ---
     skip_duplicates: bool = True  # reuse stats for byte-identical consecutive frames
