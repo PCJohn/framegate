@@ -97,7 +97,7 @@ def run(src):
         fig.add_subplot(gs[0, 4]), "saliency", "magma", (0, MAP_VMAX["saliency"])
     )
     im_tex = heat(
-        fig.add_subplot(gs[0, 5]), "fine texture", "cividis", (0, MAP_VMAX["texture"])
+        fig.add_subplot(gs[0, 5]), "text", "cividis", (0, MAP_VMAX["texture"])
     )
     # exact per-cell moment grids (autoscaled)
     im_luma = heat(fig.add_subplot(gs[1, 3]), "luma  (V mean)", "inferno")
@@ -176,7 +176,7 @@ def run(src):
             )
             _ = (
                 fs.saliency,
-                fs.fine_texture,
+                fs.text,
                 motion,
                 fs.grid_V,
                 fs.grid_S,  # force lazy maps
@@ -220,7 +220,7 @@ def run(src):
             # --- maps (fixed clim) + grids (autoscaled) ---
             im_mot.set_data(motion)
             im_sal.set_data(fs.saliency)
-            im_tex.set_data(fs.fine_texture)
+            im_tex.set_data(fs.text)
             for im, d in (
                 (im_luma, fs.grid_V[:, :, 0]),
                 (im_var, fs.grid_V[:, :, 1]),

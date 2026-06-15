@@ -69,16 +69,25 @@ def saliency_map(grid_V, grid_S, surround_k: int) -> np.ndarray:
     return np.mean(feats, axis=0).clip(min=0).astype(np.float32)
 
 
-def fine_texture(
-    grid_V, grid_S, achromatic_w: float, coarse_k: int, line_k: int
+def text(
+    grid_V,
+    grid_S,
+    achromatic_w: float,
+    coarse_k: int,
+    line_k: int,
+    skew_w: float,
+    skew_ref: float,
 ) -> np.ndarray:
-    """Per-cell fine-texture energy: high-frequency within-cell contrast that is NOT
-    explained by coarse between-cell variation (a multi-scale high-pass), down-weighted
-    by saturation and smoothed horizontally. A generic, script-agnostic cue for text /
-    print / dense UI -- patterns that are fine-scale, achromatic, and in horizontal runs
-    -- but a low-level texture descriptor, not OCR. Distinct from raw V-variance, which
-    also counts coarse structure."""
-    fine = np.sqrt(np.maximum(grid_V[:, :, M_VAR], 0.0)).astype(np.float32)
+    """Per-cell text likelihood from low-level texture. High-frequency within-cell
+    contrast NOT explained by coarse between-cell variation (a multi-scale high-pass),
+    down-weighted by saturation, gated by per-cell distribution asymmetry, and smoothed
+    horizontally. The asymmetry gate is the text-specific cue: text is bimodal -- sparse
+    ink on paper -- so its per-cell |standardized skew| is high, while isotropic clutter
+    (foliage, sensor noise) is symmetric and gets suppressed. Tuned for dense, achromatic,
+    horizontally-laid-out text (printed body text, captions, dense UI); large display or
+    colourful text score lower. A cue, not OCR."""
+    var = np.maximum(grid_V[:, :, M_VAR], 0.0)
+    fine = np.sqrt(var).astype(np.float32)
     mean = grid_V[:, :, M_MEAN].astype(np.float32)
     coarse = np.sqrt(
         np.maximum(
@@ -86,8 +95,14 @@ def fine_texture(
             0.0,
         )
     )
-    score = np.maximum(fine - coarse, 0.0) * (
-        1.0 - achromatic_w * grid_S[:, :, M_MEAN] / 255.0
+    # Bimodality gate: |standardized skew| = |m3| / var**1.5 (var**1.5 = var * fine).
+    # ~1.6 for text, ~0.2-0.7 for symmetric clutter; absolute scale, not per-frame.
+    skew = np.abs(grid_V[:, :, M_M3]) / (var * fine + 1e-6)
+    bimodal = 1.0 - skew_w * (1.0 - np.minimum(skew / skew_ref, 1.0))
+    score = (
+        np.maximum(fine - coarse, 0.0)
+        * (1.0 - achromatic_w * grid_S[:, :, M_MEAN] / 255.0)
+        * bimodal
     )
     return box(score, line_k, 1)
 

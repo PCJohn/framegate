@@ -52,9 +52,11 @@ class GateConfig:
     fade_span: float = 60.0  # V-mean change treated as a full fade
 
     # --- fine-texture map ---
-    ftex_achromatic_w: float = 0.5  # down-weight saturated cells (achromatic prior)
-    ftex_coarse_k: int = 3  # neighborhood for the coarse between-cell energy
-    ftex_line_k: int = 5  # horizontal smoothing window (text-line coherence)
+    text_achromatic_w: float = 0.5  # down-weight saturated cells (achromatic prior)
+    text_coarse_k: int = 3  # neighborhood for the coarse between-cell energy
+    text_line_k: int = 5  # horizontal smoothing window (text-line coherence)
+    text_skew_w: float = 0.6  # strength of the bimodality (|skew|) gate, 0 = off
+    text_skew_ref: float = 1.2  # |standardized skew| at which the gate saturates
 
     # --- saliency map ---
     sal_surround: int = 7  # neighborhood (cells) for the center-surround luma contrast

@@ -1,15 +1,13 @@
-# framegate default configuration.
-# Copy, edit, and load with GateConfig.from_yaml("this.yaml").
-# Mirrors the GateConfig dataclass defaults (a unit test enforces this).
+# framegate config template (generated from GateConfig defaults).
+# See the GateConfig dataclass for what each key does.
 
-# frame extraction
-thumb: 128
-stride: 1
+thumb: 256
+stride: 2
+fast_thumb: 128
 grid_exp: 5
+n_levels: 4
 fast_thresh: 10
 solid_thresh: 1.0
-
-# cut score
 shift_search: 3
 cut_w_luma: 1.0
 cut_w_color: 1.0
@@ -17,31 +15,23 @@ ncc_flattol: 1.0
 color_maxd: 2.0
 fast_static: true
 static_corr: 0.98
-
-# cut decision
 roll_win: 20
 robust_min: 8
 robust_k: 8.0
 cut_dissim: 0.45
 min_scene_len: 6
 freeze_eps: 0.2
-
-# free temporal signals
 flicker_win: 32
 fade_win: 8
 fade_span: 60.0
-
-# fine-texture map
-ftex_achromatic_w: 0.5
-ftex_coarse_k: 3
-ftex_line_k: 5
-
-# roi
-roi_k: 1.0
-roi_merge_iou: 0.75
-
-# output
+text_achromatic_w: 0.5
+text_coarse_k: 3
+text_line_k: 5
+text_skew_w: 0.6
+text_skew_ref: 1.2
+sal_surround: 7
+motion_floor_k: 1.0
+motion_surround: 7
+motion_abs_floor: 1.0
 return_frames: true
-
-# video-level optimization
 skip_duplicates: true

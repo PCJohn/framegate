@@ -59,7 +59,7 @@ def test_frame_with_maps_under_budget(frames_1080p, capsys):
     def read_maps(f):
         fs, _ = g.frame(f)
         fs.saliency
-        fs.fine_texture
+        fs.text
         _ = fs.motion
 
     ms = _bench(read_maps, frames_1080p)

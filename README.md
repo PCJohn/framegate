@@ -53,7 +53,7 @@ The design has exactly two layers, split along the only axis that matters —
 that's the "use whichever parts apply" behaviour, for free.
 
 Signals are **lazy properties**: you pay only for the ones you read. Reading
-`stats.exposure` costs nothing extra; the saliency/fine_texture/motion arrays are computed
+`stats.exposure` costs nothing extra; the saliency/text/motion arrays are computed
 only on access.
 
 **Under the hood.** Every signal is derived from **exact per-cell central moments**
@@ -120,7 +120,7 @@ Single-frame (`FrameStats`, available for images and video):
 | `clipping`       | Exposure asymmetry: >0 crushed shadows, <0 blown highlights. |
 | `noise_floor`    | Std of the flattest cell (~sensor/compression noise). |
 | `saliency`       | (G×G) coarse saliency map. |
-| `fine_texture`   | (G×G) fine high-frequency achromatic texture; a generic text/print/UI cue (not OCR). |
+| `text`           | (G×G) text likelihood: fine, achromatic, horizontally-coherent, bimodal texture. A cue for dense/printed text, not OCR. |
 | `motion`         | (G×G) motion magnitude vs the previous frame, or `None` for a still image (video only). |
 
 Temporal (`TemporalSignals`, video only):
@@ -159,13 +159,16 @@ one opinionated ROI policy:
 - **`saliency`** — `(G×G)` appearance saliency: z-scored V-variance (texture) + S-mean
   (colorfulness) + center-surround luma contrast (each cell vs its local neighborhood,
   `sal_surround`), averaged and clipped at 0. Purely per-frame.
-- **`fine_texture`** — `(G×G)` fine high-frequency achromatic texture, a generic
-  text/print/UI cue (not OCR).
+- **`text`** — `(G×G)` text likelihood from low-level texture: fine achromatic
+  high-frequency contrast in horizontal runs, gated by per-cell distribution asymmetry
+  (text is bimodal -- sparse ink on paper -- so its `|standardized skew|` is high, while
+  isotropic clutter is symmetric and is suppressed). Tuned for dense/printed text (body
+  text, captions, UI); a cue, not OCR. The one intentional text-specific feature (see Scope).
 - **`motion`** — `(G×G)` motion magnitude vs the previous frame (`None` for a still image).
   See below.
 
 All three are `(G×G)` (`G = 2**grid_exp`, default 32) at thumbnail scale; multiply cell
-indices by `shape / G` to map back to source pixels. `saliency` and `fine_texture` are
+indices by `shape / G` to map back to source pixels. `saliency` and `text` are
 cached on the `FrameStats`, so a duplicate frame reuses them for free; `motion` is recomputed
 since it depends on the previous frame.
 
@@ -192,9 +195,17 @@ The absolute term is unaffected by this; for a filled-region map set `motion_flo
 
 framegate deliberately stops at low-level, semantic-free descriptors (the moment grids
 and cheap combinations of them: contrast, colorfulness, texture energy, saliency). It
-does **not** ship face / barcode / QR / logo detectors, and `fine_texture` is named for
-the *pattern* it measures, not for "text" — it's one example of composing primitives
-(high fine-contrast + achromatic + horizontal coherence), nothing more.
+does **not** ship face / barcode / QR / logo detectors.
+
+The one deliberate exception is **`text`**. It composes text-specific priors -- fine
+achromatic contrast in horizontal runs, gated by per-cell bimodality (the asymmetric
+ink-on-paper distribution that text produces) -- so it is a genuine text *cue*, not a
+generic texture descriptor. We make this single exception because text is near-universal
+in real imagery and underpins a large class of downstream applications, and because the
+cue costs nothing beyond the moments already computed (the bimodality gate reuses the
+skew that `tensorstats` returns for free). It is still only a cue, not OCR: it is tuned
+for dense, achromatic, horizontally-laid-out text (printed body text, captions, dense UI)
+and scores large display or colourful text lower.
 
 That boundary is intentional. Object-specific detection is either better served by a
 real detector (a Haar/own cascade, a barcode/QR decoder, a small CNN) or is exactly the
@@ -330,7 +341,7 @@ Practical levers, fastest path to a smaller number first:
   previous result behind a cheap strided pre-check — near-free on slideshows, padded streams,
   or held frames.
 - **Read signals lazily.** `FrameStats` maps and scalars compute on first access and cache.
-  If you only need the cut decision, don't touch `fs.saliency` / `fs.fine_texture` /
+  If you only need the cut decision, don't touch `fs.saliency` / `fs.text` /
   `fs.motion` — that is the ~0.15 ms gap between `frame()` and `frame() + all maps`.
 - **Disable the garbage collector around your loop.** GC pauses are the dominant source of
   latency *spikes* (not the steady cost): `gc.disable()` before the loop with a periodic

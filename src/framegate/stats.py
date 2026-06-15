@@ -100,16 +100,19 @@ class FrameStats:
         return S.saliency_map(self.grid_V, self.grid_S, self.cfg.sal_surround)
 
     @cached_property
-    def fine_texture(self):
-        """(G,G) fine high-frequency achromatic texture -- a generic text/print/UI
-        cue (not OCR). See signals.fine_texture."""
+    def text(self):
+        """(G,G) text likelihood from low-level texture: a fine, achromatic, horizontally
+        coherent, bimodal cue. Tuned for dense/printed text (body text, captions, UI);
+        a cue, not OCR. See signals.text."""
         c = self.cfg
-        return S.fine_texture(
+        return S.text(
             self.grid_V,
             self.grid_S,
-            c.ftex_achromatic_w,
-            c.ftex_coarse_k,
-            c.ftex_line_k,
+            c.text_achromatic_w,
+            c.text_coarse_k,
+            c.text_line_k,
+            c.text_skew_w,
+            c.text_skew_ref,
         )
 
     @property

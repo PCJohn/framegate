@@ -68,7 +68,7 @@ def _read_maps(g):
     def f(frame):
         fs, _ = g.frame(frame)
         fs.saliency
-        fs.fine_texture
+        fs.text
         _ = fs.motion
 
     return f
