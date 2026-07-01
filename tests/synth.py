@@ -18,7 +18,9 @@ def hsv_scene(hue, vseed, sat=200, size=THUMB):
 
 
 def noisy(img, amp=3):
-    return np.clip(img.astype(np.int16) + _rng.integers(-amp, amp + 1, img.shape), 0, 255).astype(np.uint8)
+    return np.clip(
+        img.astype(np.int16) + _rng.integers(-amp, amp + 1, img.shape), 0, 255
+    ).astype(np.uint8)
 
 
 def dim(img, factor):
@@ -59,6 +61,34 @@ def checkerboard(size=THUMB, cell=8):
     return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
 
 
+def text_block(size=256, scale=0.5):
+    """Lines of real rendered text (mixed-orientation strokes, dark ink on light
+    paper) -- a realistic text proxy, unlike single-orientation bars. Rendered at
+    thumb resolution so strokes survive resizing."""
+    img = np.full((size, size), 235, np.uint8)
+    for y in range(24, size - 6, 26):
+        cv2.putText(
+            img,
+            "The quick brown fox",
+            (6, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            scale,
+            20,
+            1,
+            cv2.LINE_AA,
+        )
+    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
+def rules(size=256):
+    """Horizontal rule lines on paper (underlines / table borders): a coherent,
+    bimodal, achromatic oriented pattern -- a hard text false-positive."""
+    img = np.full((size, size), 235, np.uint8)
+    for y in range(20, size - 6, 30):
+        img[y : y + 2, 10 : size - 10] = 20
+    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
 def stripes(size=THUMB, period=4, horizontal=True):
     """Fine achromatic line pattern (text-like high-frequency horizontal texture)."""
     idx = (np.arange(size) // (period // 2)) % 2 * 255
@@ -70,7 +100,7 @@ def moving_block(x, size=THUMB, w=None, bg=30, fg=220):
     """A bright block on a dark field, left edge at column `x` (for motion tests)."""
     w = w or size // 3
     f = np.full((size, size, 3), bg, np.uint8)
-    f[size // 3: 2 * size // 3, x: x + w] = fg
+    f[size // 3 : 2 * size // 3, x : x + w] = fg
     return f
 
 
@@ -88,6 +118,7 @@ def run_stream(gate_or_stream, frames, gate=None):
     """Drive a sequence and collect (cuts, freezes, fades, flickers).
     If `gate` is given, frames are FrameStats producers; otherwise a Gate is used."""
     from framegate import Gate
+
     g = gate_or_stream if isinstance(gate_or_stream, Gate) else Gate()
     cuts, freezes, fades, flickers = [], 0, [], []
     for f in frames:

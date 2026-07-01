@@ -32,11 +32,30 @@ def test_blank_classification_on_degenerate_inputs(img, want_blank):
     assert fs.blank is want_blank
 
 
-def test_regular_patterns_without_fast_corners_read_blank():
-    # a clean checkerboard / gradient has high variance but no FAST corner arcs,
-    # so the gate (correctly) treats it as having nothing localizable to detect.
+def test_regular_patterns_read_blank():
+    # checkerboard: cells fall inside the squares -> zero within-cell variance -> blank
+    # via the solid tier. gradient: smooth, negligible edge energy -> blank via the
+    # energy tier. (Neither needs the old FAST corner detector.)
     assert Gate().image(synth.checkerboard(cell=16)).blank is True
     assert Gate().image(synth.gradient()).blank is True
+
+
+def test_fine_texture_is_not_blank():
+    # Fine periodic texture has real edge energy but no corners -- the old FAST check
+    # wrongly blanked it; the energy check keeps it (it is trackable content).
+    assert Gate().image(synth.noisy(synth.stripes(period=4))).blank is False
+    assert Gate().image(synth.noisy(synth.checkerboard(cell=2))).blank is False
+    # ...while genuinely featureless frames still read blank.
+    assert Gate().image(synth.gradient()).blank is True
+    assert Gate().image(synth.noisy(synth.solid(128), amp=3)).blank is True
+
+
+def test_blank_energy_threshold_is_the_lever():
+    striped = synth.noisy(synth.stripes(period=4))
+    assert Gate(GateConfig(edge_thresh=1000.0)).image(striped).blank is False
+    assert (
+        Gate(GateConfig(edge_thresh=1e12)).image(striped).blank is True
+    )  # term dominates
 
 
 def test_solid_inputs_have_sane_scalars():
@@ -147,22 +166,39 @@ def test_text_responds_to_fine_not_smooth():
 
 
 def test_text_bimodality_suppresses_isotropic_clutter():
-    # asymmetric "text": sparse dark marks on light paper, in horizontal rows
-    rng = np.random.default_rng(0)
-    txt = np.full((128, 128, 3), 225, np.uint8)
-    for r in range(8, 122, 10):
-        for c in range(6, 122, 2):
-            if rng.random() < 0.55:
-                txt[r : r + 5, c : c + 1] = 30
+    # realistic text: dark ink on light paper, mixed-orientation strokes
+    txt = synth.text_block()
     # symmetric multi-scale achromatic clutter (foliage-like), comparable fine energy
+    rng = np.random.default_rng(0)
     base = np.repeat(np.repeat(rng.integers(40, 210, (16, 16)), 8, 0), 8, 1)
     clut = (0.6 * base + 0.4 * rng.integers(0, 255, (128, 128))).astype(np.uint8)
     clut = np.stack([clut] * 3, -1)
     t = Gate().image(txt).text.max()
     c = Gate().image(clut).text.max()
     assert (
-        t > 3.0 * c
+        t > 2.0 * c
     )  # bimodality gate keeps asymmetric text, suppresses symmetric clutter
+
+
+def test_text_isotropy_gate_suppresses_oriented_patterns():
+    """Coherent oriented patterns (parallel stripes, horizontal rules) are bimodal,
+    fine, achromatic -- they fool the moment cues -- but have high gradient coherence.
+    The isotropy gate suppresses them. Without it (coh_w=0) stripes outscore real text;
+    with it, text wins and both patterns are strongly cut down."""
+    txt, stripes, rules = synth.text_block(), synth.stripes(period=4), synth.rules()
+    on, off = GateConfig(), GateConfig(text_coherence_w=0.0)
+
+    t_off, s_off, r_off = (
+        Gate(off).image(im).text.max() for im in (txt, stripes, rules)
+    )
+    t_on, s_on, r_on = (Gate(on).image(im).text.max() for im in (txt, stripes, rules))
+
+    assert t_off < s_off  # without the gate, stripes beat text (the bug we fix)
+    assert t_on > s_on  # with it, real text wins
+    assert (
+        s_on < 0.6 * s_off and r_on < 0.6 * r_off
+    )  # both patterns strongly suppressed
+    assert t_on > 0.6 * t_off  # real text only mildly affected
 
 
 def test_saliency_localizes_a_distinct_patch():

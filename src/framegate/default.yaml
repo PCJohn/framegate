@@ -3,11 +3,10 @@
 
 thumb: 256
 stride: 2
-fast_thumb: 128
 grid_exp: 5
 n_levels: 4
-fast_thresh: 10
 solid_thresh: 1.0
+edge_thresh: 1000.0
 shift_search: 3
 cut_w_luma: 1.0
 cut_w_color: 1.0

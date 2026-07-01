@@ -21,13 +21,14 @@ import yaml
 @dataclass(frozen=True)
 class GateConfig:
     # --- frame extraction ---
-    thumb: int = 256  # thumbnail side for stats + FAST
+    thumb: int = 256  # thumbnail side for stats
     stride: int = 2  # grid stride; >1 = indexed-gather over a subsample
-    fast_thumb: int = 128  # resolution for the FAST blank-check (subsampled from thumb)
     grid_exp: int = 5  # 2^grid_exp cells/dim (5 -> 32x32); output/finest level
     n_levels: int = 4  # dyadic pyramid levels from grid_exp (5,4,3,2 -> 32..4)
-    fast_thresh: int = 10  # FAST corner threshold (tier-2 blank check)
     solid_thresh: float = 1.0  # blank if max V cell-variance < this
+    edge_thresh: float = (
+        1000.0  # ...or if max cell edge-energy < this (structure check)
+    )
 
     # --- cut score ---
     shift_search: int = 3  # motion-compensation radius in cells
@@ -57,6 +58,9 @@ class GateConfig:
     text_line_k: int = 5  # horizontal smoothing window (text-line coherence)
     text_skew_w: float = 0.6  # strength of the bimodality (|skew|) gate, 0 = off
     text_skew_ref: float = 1.2  # |standardized skew| at which the gate saturates
+    text_coherence_w: float = (
+        0.6  # isotropy gate: suppress coherent oriented edges/rules, 0 = off
+    )
 
     # --- saliency map ---
     sal_surround: int = 7  # neighborhood (cells) for the center-surround luma contrast

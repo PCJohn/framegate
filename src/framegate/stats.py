@@ -10,6 +10,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
+import structstats as ss
 import tensorstats as ts
 
 from . import signals as S
@@ -39,6 +40,9 @@ class FrameStats:
         None  # (G,G) photometric change vs the previous frame;
     )
     #   set by StreamAnalyzer, None for a standalone image or the first/post-blank frame
+    struct: Optional[dict] = (
+        None  # structstats.features(V): per-level (cells,cells,5) + "global" (5,)
+    )
 
     # --- per-channel grids (views; raw moments) ---
     @property
@@ -108,11 +112,13 @@ class FrameStats:
         return S.text(
             self.grid_V,
             self.grid_S,
+            self.coherence,
             c.text_achromatic_w,
             c.text_coarse_k,
             c.text_line_k,
             c.text_skew_w,
             c.text_skew_ref,
+            c.text_coherence_w,
         )
 
     @property
@@ -150,6 +156,33 @@ class FrameStats:
             np.float32,
         )
 
+    # --- structure maps (gradient structure-tensor, from structstats) ---
+    # Complementary to the moment grids: these see edge/gradient layout the
+    # intensity moments are blind to. All on the finest grid, so (G, G).
+    @property
+    def edge_energy(self):
+        return self.struct["grid_0"][:, :, S.SE_ENERGY]
+
+    @property
+    def coherence(self):
+        return self.struct["grid_0"][:, :, S.SE_COH]  # in [0,1]; 1 = one dominant edge
+
+    @property
+    def cornerness(self):
+        return self.struct["grid_0"][:, :, S.SE_CORN]  # Shi-Tomasi lambda_min
+
+    @cached_property
+    def orientation(self):
+        """(G,G) dominant edge orientation in radians (-pi/2, pi/2], from the
+        double-angle vector; its reliability is `coherence`, kept separate."""
+        g = self.struct["grid_0"]
+        return 0.5 * np.arctan2(g[:, :, S.SE_OS], g[:, :, S.SE_OC])
+
+    @property
+    def sharpness(self):
+        """Global gradient energy (log1p) -- a scalar focus/detail proxy."""
+        return float(np.log1p(self.struct["global"][S.SE_ENERGY]))
+
 
 class FrameGate:
     """Per-frame extractor. Owns reusable buffers and one StatsComputer; no
@@ -160,25 +193,22 @@ class FrameGate:
     def __init__(self, cfg: GateConfig = None):
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
-        self._fast = cv2.FastFeatureDetector_create(
-            threshold=self.cfg.fast_thresh, nonmaxSuppression=False
-        )
         self._stats = ts.StatsComputer(
             shape=(t, t, 3),
             axes=[(0, 1)],
             stride=(self.cfg.stride, self.cfg.stride, 1),
             grid=[(e, e, 2) for e in self.cfg.pyramid_exps],
         )
+        self._struct = ss.StructComputer(
+            shape=(t, t),
+            grid=[(e, e) for e in self.cfg.pyramid_exps],  # cells align 1:1 with _stats
+            stride=self.cfg.stride,
+        )
         self._bgr = np.empty(
             (t, t, 3), np.uint8
         )  # scratch reused when not returning frames
         self._gray = np.empty((t, t), np.uint8)
         self._hsv = np.empty((t, t, 3), np.uint8)
-        # FAST runs on a subsample of V; precompute the step + a reusable buffer.
-        self._fast_step = max(1, t // self.cfg.fast_thumb)
-        if self._fast_step > 1:
-            n = len(range(0, t, self._fast_step))
-            self._vfast = np.empty((n, n), np.uint8)
 
     def _to_hsv(self, frame: np.ndarray, keep: bool):
         """Resize to the thumbnail and produce HSV. Grayscale becomes H=S=0, V=luma,
@@ -215,16 +245,15 @@ class FrameGate:
             0
         ]  # finest = output-map resolution; coarser levels feed multi-scale signals
 
-        # Lossless: a stats-flat frame has no FAST corners, so skip the detector.
-        # FAST is only the blank check, so run it on a cheaper subsample of V.
-        if self._fast_step == 1:
-            vch = hsv[:, :, S.CH_V]
-        else:
-            self._vfast[:] = hsv[:: self._fast_step, :: self._fast_step, S.CH_V]
-            vch = self._vfast
+        # Structure-tensor features over the same V plane, same cells (zero-copy view).
+        struct = self._struct.features(hsv[:, :, S.CH_V])
+
+        # Blank = nothing to track: flat everywhere (no cell-level intensity spread) OR
+        # negligible gradient anywhere (no edge/texture energy). The energy term reuses
+        # the structure pass above -- no separate corner detector or resize.
         blank = (
             float(grid[:, :, S.CH_V, S.M_VAR].max()) < self.cfg.solid_thresh
-            or len(self._fast.detect(vch, None)) == 0
+            or float(struct["grid_0"][:, :, S.SE_ENERGY].max()) < self.cfg.edge_thresh
         )
 
         return FrameStats(
@@ -236,4 +265,5 @@ class FrameGate:
             cfg=self.cfg,
             thumb=thumb,
             hsv=hsv if keep else None,
+            struct=struct,
         )

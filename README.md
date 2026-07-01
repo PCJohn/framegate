@@ -31,10 +31,12 @@ for frame in frames:
 ## Install
 
 `framegate` depends on [`tensorstats`](https://github.com/PCJohn/tensorstats) for the
-fast moment computation. Install it first (it is not on PyPI):
+fast moment computation and [`structstats`](https://github.com/PCJohn/structstats) for the
+gradient structure-tensor features. Install both first (neither is on PyPI):
 
 ```bash
 pip install git+https://github.com/PCJohn/tensorstats
+pip install git+https://github.com/PCJohn/structstats
 pip install framegate            # add [viz] for the example visualizer, [dev] for tests
 ```
 
@@ -121,6 +123,11 @@ Single-frame (`FrameStats`, available for images and video):
 | `noise_floor`    | Std of the flattest cell (~sensor/compression noise). |
 | `saliency`       | (G×G) coarse saliency map. |
 | `text`           | (G×G) text likelihood: fine, achromatic, horizontally-coherent, bimodal texture. A cue for dense/printed text, not OCR. |
+| `edge_energy`    | (G×G) gradient (edge) energy per cell. |
+| `coherence`      | (G×G) edge anisotropy in [0,1]; 1 = a single dominant orientation. |
+| `cornerness`     | (G×G) Shi-Tomasi corner strength (smaller structure-tensor eigenvalue). |
+| `orientation`    | (G×G) dominant edge orientation in radians; reliability is `coherence`. |
+| `sharpness`      | Scalar global gradient energy (`log1p`); a cheap focus/detail proxy. |
 | `motion`         | (G×G) motion magnitude vs the previous frame, or `None` for a still image (video only). |
 
 Temporal (`TemporalSignals`, video only):
@@ -160,12 +167,23 @@ one opinionated ROI policy:
   (colorfulness) + center-surround luma contrast (each cell vs its local neighborhood,
   `sal_surround`), averaged and clipped at 0. Purely per-frame.
 - **`text`** — `(G×G)` text likelihood from low-level texture: fine achromatic
-  high-frequency contrast in horizontal runs, gated by per-cell distribution asymmetry
-  (text is bimodal -- sparse ink on paper -- so its `|standardized skew|` is high, while
-  isotropic clutter is symmetric and is suppressed). Tuned for dense/printed text (body
-  text, captions, UI); a cue, not OCR. The one intentional text-specific feature (see Scope).
+  high-frequency contrast in horizontal runs, gated by two orthogonal cues. The first is
+  per-cell distribution asymmetry (text is bimodal -- sparse ink on paper -- so its
+  `|standardized skew|` is high, while isotropic clutter is symmetric and is suppressed).
+  The second is gradient *isotropy*: real text mixes stroke orientations within a cell
+  (low structure-tensor coherence, from [`structstats`](https://github.com/PCJohn/structstats)),
+  so coherent oriented patterns that survive the high-pass -- single edges, parallel rules,
+  fences, hatching -- are suppressed (`text_coherence_w`, 0 = off). Tuned for dense/printed
+  text (body text, captions, UI); a cue, not OCR. The one intentional text-specific feature
+  (see Scope).
 - **`motion`** — `(G×G)` motion magnitude vs the previous frame (`None` for a still image).
   See below.
+- **structure maps** (`edge_energy`, `coherence`, `cornerness`, `orientation`) — `(G×G)`
+  gradient structure-tensor features from [`structstats`](https://github.com/PCJohn/structstats),
+  computed over the same V plane and the same cells in one extra pass. They read the *gradient
+  layout* the intensity moments are blind to: how much edge energy a cell has, whether it is
+  anisotropic (one dominant edge) or isotropic clutter, whether it contains a corner, and the
+  edge direction. `sharpness` is the global-energy scalar (a focus/detail proxy).
 
 All three are `(G×G)` (`G = 2**grid_exp`, default 32) at thumbnail scale; multiply cell
 indices by `shape / G` to map back to source pixels. `saliency` and `text` are

@@ -15,9 +15,10 @@ dependencies = [
     "numpy>=1.22",
     "opencv-python>=4.5",
     "pyyaml>=5.4",
-    # tensorstats provides the fast moment computation and is a prerequisite.
-    # It is not on PyPI; install it first, e.g.:
+    # tensorstats (moments) and structstats (gradient structure) are prerequisites.
+    # Neither is on PyPI; install them first, e.g.:
     #   pip install git+https://github.com/PCJohn/tensorstats
+    #   pip install git+https://github.com/PCJohn/structstats
 ]
 
 [project.optional-dependencies]

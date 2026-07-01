@@ -14,6 +14,9 @@ from numpy.lib.stride_tricks import sliding_window_view
 CH_H, CH_S, CH_V = 0, 1, 2
 M_MEAN, M_VAR, M_M3, M_M4 = 0, 1, 2, 3
 
+# structstats.features() channel layout (ss.FEATURES order).
+SE_ENERGY, SE_COH, SE_OC, SE_OS, SE_CORN = 0, 1, 2, 3, 4
+
 
 def zscore(x: np.ndarray) -> np.ndarray:
     s = x.std()
@@ -72,20 +75,26 @@ def saliency_map(grid_V, grid_S, surround_k: int) -> np.ndarray:
 def text(
     grid_V,
     grid_S,
+    coherence,
     achromatic_w: float,
     coarse_k: int,
     line_k: int,
     skew_w: float,
     skew_ref: float,
+    coh_w: float,
 ) -> np.ndarray:
     """Per-cell text likelihood from low-level texture. High-frequency within-cell
     contrast NOT explained by coarse between-cell variation (a multi-scale high-pass),
-    down-weighted by saturation, gated by per-cell distribution asymmetry, and smoothed
-    horizontally. The asymmetry gate is the text-specific cue: text is bimodal -- sparse
-    ink on paper -- so its per-cell |standardized skew| is high, while isotropic clutter
-    (foliage, sensor noise) is symmetric and gets suppressed. Tuned for dense, achromatic,
-    horizontally-laid-out text (printed body text, captions, dense UI); large display or
-    colourful text score lower. A cue, not OCR."""
+    down-weighted by saturation, gated by per-cell distribution asymmetry, gated by
+    gradient isotropy, and smoothed horizontally. Two complementary, orthogonal gates
+    make this text-specific: (1) the asymmetry gate -- text is bimodal (sparse ink on
+    paper), so its per-cell |standardized skew| is high while isotropic clutter (foliage,
+    noise) is symmetric and is suppressed; (2) the isotropy gate -- text is a mix of
+    stroke orientations within a cell (low structure-tensor coherence), so coherent
+    oriented patterns (single edges, rules, fences, hatching) that survive the high-pass
+    are suppressed. Tuned for dense, achromatic, horizontally-laid-out text (printed body
+    text, captions, dense UI); large display or colourful text score lower. A cue, not OCR.
+    """
     var = np.maximum(grid_V[:, :, M_VAR], 0.0)
     fine = np.sqrt(var).astype(np.float32)
     mean = grid_V[:, :, M_MEAN].astype(np.float32)
@@ -99,10 +108,14 @@ def text(
     # ~1.6 for text, ~0.2-0.7 for symmetric clutter; absolute scale, not per-frame.
     skew = np.abs(grid_V[:, :, M_M3]) / (var * fine + 1e-6)
     bimodal = 1.0 - skew_w * (1.0 - np.minimum(skew / skew_ref, 1.0))
+    # Isotropy gate: coherence ~0.5 for mixed-orientation text, ~1 for a single
+    # dominant edge / parallel rules; down-weight the coherent (non-text) cells.
+    iso = np.clip(1.0 - coh_w * coherence, 0.0, 1.0)
     score = (
         np.maximum(fine - coarse, 0.0)
         * (1.0 - achromatic_w * grid_S[:, :, M_MEAN] / 255.0)
         * bimodal
+        * iso
     )
     return box(score, line_k, 1)
 
