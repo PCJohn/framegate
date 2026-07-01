@@ -61,10 +61,10 @@ def best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
 
 def saliency_map(grid_V, grid_S, surround_k: int) -> np.ndarray:
     """Coarse (G,G) appearance saliency from per-cell stats: V-variance (texture) +
-    S-mean (colorfulness) + center-surround luma contrast, z-scored and averaged, clipped
+    S-mean (colorfulness) + center-surround luma contrast, z-scored, averaged, clipped
     at 0. The luma term is |V-mean - local mean| over a `surround_k` neighborhood (a box
     blur), so a cell is judged against its surround rather than the global frame mean --
-    the standard bottom-up center-surround principle. Purely per-frame; motion is separate.
+    the standard bottom-up center-surround principle. Per-frame; motion is separate.
     """
     vmean = grid_V[:, :, M_MEAN].astype(np.float32)
     v_con = np.abs(vmean - box(vmean, surround_k, surround_k))
@@ -88,12 +88,12 @@ def text(
     down-weighted by saturation, gated by per-cell distribution asymmetry, gated by
     gradient isotropy, and smoothed horizontally. Two complementary, orthogonal gates
     make this text-specific: (1) the asymmetry gate -- text is bimodal (sparse ink on
-    paper), so its per-cell |standardized skew| is high while isotropic clutter (foliage,
+    paper), so its per-cell |standardized skew| is high while isotropic clutter (leaves,
     noise) is symmetric and is suppressed; (2) the isotropy gate -- text is a mix of
     stroke orientations within a cell (low structure-tensor coherence), so coherent
     oriented patterns (single edges, rules, fences, hatching) that survive the high-pass
-    are suppressed. Tuned for dense, achromatic, horizontally-laid-out text (printed body
-    text, captions, dense UI); large display or colourful text score lower. A cue, not OCR.
+    are suppressed. Tuned for dense, achromatic, horizontal text (printed body
+    text, captions, UI); large-display or colourful text score lower. A cue, not OCR.
     """
     var = np.maximum(grid_V[:, :, M_VAR], 0.0)
     fine = np.sqrt(var).astype(np.float32)

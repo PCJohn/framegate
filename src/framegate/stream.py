@@ -72,13 +72,13 @@ class StreamAnalyzer:
     robust (median+MAD) outlier AND an isolated peak (rejecting pans/dissolves),
     debounced by a minimum shot length, confirmed with 1 frame of latency."""
 
-    def __init__(self, cfg: GateConfig = None):
+    def __init__(self, cfg: Optional[GateConfig] = None):
         self.cfg = cfg or GateConfig()
         self._prev_luma: Optional[np.ndarray] = None  # prev cell-mean luma map (G, G)
         self._prev_color: Optional[np.ndarray] = None  # prev global colour vector (3,)
         self._prev_V: Optional[float] = None
         self._roll = _RollingRobust(self.cfg.roll_win, self.cfg.robust_min)
-        self._vhist = deque(maxlen=self.cfg.flicker_win)
+        self._vhist: deque = deque(maxlen=self.cfg.flicker_win)
         self._han = np.hanning(self.cfg.flicker_win).astype(
             np.float32
         )  # precomputed for flicker
@@ -120,12 +120,13 @@ class StreamAnalyzer:
                 return corr0
         return S.best_shift(prev, cur, c.shift_search)[0]
 
-    def _cut_score(self, prev_luma, prev_color, cur_luma, cur_color):
-        """(cut_score, luma_corr) = max of luma-structure and global colour-shift."""
+    def _cut_score(self, prev_luma, prev_color, cur_luma, cur_color) -> tuple:
+        """(cut_score, luma_corr) = max of the luma-structure and global colour-shift
+        dissimilarities, each already normalized to ~[0, 1]."""
         c = self.cfg
         luma_corr = self._luma_corr(prev_luma, cur_luma)
         color = float(np.linalg.norm(prev_color - cur_color)) / (255.0 * c.color_maxd)
-        return max(c.cut_w_luma * (1.0 - luma_corr), c.cut_w_color * color), luma_corr
+        return max(1.0 - luma_corr, color), luma_corr
 
     def update(self, fs) -> TemporalSignals:
         c = self.cfg

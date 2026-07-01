@@ -8,8 +8,6 @@ n_levels: 4
 solid_thresh: 1.0
 edge_thresh: 1000.0
 shift_search: 3
-cut_w_luma: 1.0
-cut_w_color: 1.0
 ncc_flattol: 1.0
 color_maxd: 2.0
 fast_static: true
@@ -26,8 +24,9 @@ fade_span: 60.0
 text_achromatic_w: 0.5
 text_coarse_k: 3
 text_line_k: 5
-text_skew_w: 0.6
+text_skew_w: 0.8
 text_skew_ref: 1.2
+text_coherence_w: 0.8
 sal_surround: 7
 motion_floor_k: 1.0
 motion_surround: 7

@@ -61,23 +61,39 @@ def checkerboard(size=THUMB, cell=8):
     return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
 
 
-def text_block(size=256, scale=0.5):
+FONTS = (
+    cv2.FONT_HERSHEY_SIMPLEX,
+    cv2.FONT_HERSHEY_COMPLEX,
+    cv2.FONT_HERSHEY_DUPLEX,
+    cv2.FONT_HERSHEY_TRIPLEX,
+    cv2.FONT_HERSHEY_SCRIPT_SIMPLEX,
+)
+
+
+def text_block(size=256, scale=0.5, font=0, fg=20, bg=235, thick=1, rot=0.0):
     """Lines of real rendered text (mixed-orientation strokes, dark ink on light
-    paper) -- a realistic text proxy, unlike single-orientation bars. Rendered at
-    thumb resolution so strokes survive resizing."""
-    img = np.full((size, size), 235, np.uint8)
+    paper) -- a realistic text proxy, unlike single-orientation bars. Parametric over
+    font, colour, weight and rotation so tests can sweep realistic variation. `fg`/`bg`
+    may be a scalar grey or a BGR triple. Rendered at thumb resolution so strokes
+    survive resizing."""
+    fg = fg if isinstance(fg, (tuple, list)) else (fg, fg, fg)
+    bg = bg if isinstance(bg, (tuple, list)) else (bg, bg, bg)
+    img = np.full((size, size, 3), bg, np.uint8)
     for y in range(24, size - 6, 26):
         cv2.putText(
             img,
             "The quick brown fox",
             (6, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
+            FONTS[font],
             scale,
-            20,
-            1,
+            fg,
+            thick,
             cv2.LINE_AA,
         )
-    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    if rot:
+        m = cv2.getRotationMatrix2D((size / 2, size / 2), rot, 1.0)
+        img = cv2.warpAffine(img, m, (size, size), borderValue=bg)
+    return img
 
 
 def rules(size=256):
@@ -87,6 +103,19 @@ def rules(size=256):
     for y in range(20, size - 6, 30):
         img[y : y + 2, 10 : size - 10] = 20
     return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
+def foliage(size=256, seed=1):
+    """Organic multi-scale achromatic clutter (foliage/gravel-like): symmetric,
+    isotropic, high-frequency -- the canonical non-text texture distractor."""
+    rng = np.random.default_rng(seed)
+    coarse = np.repeat(
+        np.repeat(rng.integers(40, 210, (20, 20)), size // 20 + 1, 0), size // 20 + 1, 1
+    )
+    g = (0.6 * coarse[:size, :size] + 0.4 * rng.integers(0, 255, (size, size))).astype(
+        np.uint8
+    )
+    return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
 
 
 def stripes(size=THUMB, period=4, horizontal=True):

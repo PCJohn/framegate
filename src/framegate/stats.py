@@ -9,7 +9,6 @@ from typing import Optional
 
 import cv2
 import numpy as np
-
 import structstats as ss
 import tensorstats as ts
 
@@ -41,58 +40,58 @@ class FrameStats:
     )
     #   set by StreamAnalyzer, None for a standalone image or the first/post-blank frame
     struct: Optional[dict] = (
-        None  # structstats.features(V): per-level (cells,cells,5) + "global" (5,)
+        None  # structstats.features(V): "grid_0" (G,G,5) + "global" (5,)
     )
 
     # --- per-channel grids (views; raw moments) ---
     @property
-    def grid_H(self):
+    def grid_H(self) -> np.ndarray:
         return self.grid[:, :, S.CH_H, :]
 
     @property
-    def grid_S(self):
+    def grid_S(self) -> np.ndarray:
         return self.grid[:, :, S.CH_S, :]
 
     @property
-    def grid_V(self):
+    def grid_V(self) -> np.ndarray:
         return self.grid[:, :, S.CH_V, :]
 
     @property
-    def v_cell_mean(self):
+    def v_cell_mean(self) -> np.ndarray:
         return self.grid[:, :, S.CH_V, S.M_MEAN]
 
     @property
-    def v_cell_var(self):
+    def v_cell_var(self) -> np.ndarray:
         return self.grid[:, :, S.CH_V, S.M_VAR]
 
     # --- generic single-frame signals ---
     @property
-    def exposure(self):
+    def exposure(self) -> float:
         return float(self.chan[S.CH_V, S.M_MEAN])
 
     @property
-    def contrast(self):
+    def contrast(self) -> float:
         return float(np.sqrt(max(self.chan[S.CH_V, S.M_VAR], 0.0)))
 
     @property
-    def colorfulness(self):
+    def colorfulness(self) -> float:
         return float(self.chan[S.CH_S, S.M_MEAN])  # ~0 -> grayscale/graphic
 
     @property
-    def detail(self):
+    def detail(self) -> float:
         return float(self.v_cell_var.mean())  # SI-like spatial complexity
 
     @property
-    def flat_fraction(self):
+    def flat_fraction(self) -> float:
         return float((self.v_cell_var < self.cfg.solid_thresh).mean())
 
     @property
-    def noise_floor(self):
+    def noise_floor(self) -> float:
         """Std of the flattest cell ~= sensor / compression noise floor."""
         return float(np.sqrt(max(self.v_cell_var.min(), 0.0)))
 
     @property
-    def clipping(self):
+    def clipping(self) -> float:
         """Exposure asymmetry from V skew. >0: piled near black (crushed shadows);
         <0: piled near white (blown highlights); ~0: balanced."""
         sd = self.chan[S.CH_V, S.M_VAR] ** 0.5
@@ -100,12 +99,12 @@ class FrameStats:
 
     # --- derived maps (cached: pure per-frame, so a duplicate frame reuses them) ---
     @cached_property
-    def saliency(self):
+    def saliency(self) -> np.ndarray:
         return S.saliency_map(self.grid_V, self.grid_S, self.cfg.sal_surround)
 
     @cached_property
-    def text(self):
-        """(G,G) text likelihood from low-level texture: a fine, achromatic, horizontally
+    def text(self) -> np.ndarray:
+        """(G,G) text likelihood from low-level texture: a fine, achromatic,
         coherent, bimodal cue. Tuned for dense/printed text (body text, captions, UI);
         a cue, not OCR. See signals.text."""
         c = self.cfg
@@ -122,24 +121,21 @@ class FrameStats:
         )
 
     @property
-    def motion(self):
-        """(G,G) motion magnitude vs the previous frame -- |residual| after removing global
-        gain/bias -- or None for a standalone image / first / post-blank frame. A noise floor
-        is subtracted: the larger of a relative local floor (cfg.motion_floor_k * local mean
-        |residual| over a cfg.motion_surround neighborhood) and an absolute floor
-        (cfg.motion_abs_floor grey levels). The local term adapts to regionally-varying noise;
-        the absolute term ensures sub-grey-level change reads as no motion on any frame. Set
-        both motion_floor_k and motion_abs_floor to 0 for the raw magnitude; the signed change
-        is always in `residual`."""
+    def motion(self) -> Optional[np.ndarray]:
+        """(G,G) motion magnitude vs the previous frame: |residual| (after removing
+        global gain/bias) minus a noise floor, or None for a still image / first /
+        post-blank frame. The floor is the larger of a relative local term
+        (motion_floor_k * local-mean |residual| over motion_surround cells) and an
+        absolute term (motion_abs_floor grey levels); set both to 0 for raw magnitude.
+        The signed change is always in `residual`."""
         if self.residual is None:
             return None
         m = np.abs(self.residual)
         floor = self.cfg.motion_abs_floor
         if self.cfg.motion_floor_k > 0.0:
-            floor = np.maximum(
-                self.cfg.motion_floor_k
-                * S.box(m, self.cfg.motion_surround, self.cfg.motion_surround),
-                floor,
+            local = S.box(m, self.cfg.motion_surround, self.cfg.motion_surround)
+            return np.maximum(
+                m - np.maximum(self.cfg.motion_floor_k * local, floor), 0.0
             )
         return np.maximum(m - floor, 0.0)
 
@@ -160,26 +156,26 @@ class FrameStats:
     # Complementary to the moment grids: these see edge/gradient layout the
     # intensity moments are blind to. All on the finest grid, so (G, G).
     @property
-    def edge_energy(self):
+    def edge_energy(self) -> np.ndarray:
         return self.struct["grid_0"][:, :, S.SE_ENERGY]
 
     @property
-    def coherence(self):
+    def coherence(self) -> np.ndarray:
         return self.struct["grid_0"][:, :, S.SE_COH]  # in [0,1]; 1 = one dominant edge
 
     @property
-    def cornerness(self):
+    def cornerness(self) -> np.ndarray:
         return self.struct["grid_0"][:, :, S.SE_CORN]  # Shi-Tomasi lambda_min
 
     @cached_property
-    def orientation(self):
+    def orientation(self) -> np.ndarray:
         """(G,G) dominant edge orientation in radians (-pi/2, pi/2], from the
         double-angle vector; its reliability is `coherence`, kept separate."""
         g = self.struct["grid_0"]
         return 0.5 * np.arctan2(g[:, :, S.SE_OS], g[:, :, S.SE_OC])
 
     @property
-    def sharpness(self):
+    def sharpness(self) -> float:
         """Global gradient energy (log1p) -- a scalar focus/detail proxy."""
         return float(np.log1p(self.struct["global"][S.SE_ENERGY]))
 
@@ -190,7 +186,7 @@ class FrameGate:
     Accepts BGR (H,W,3) or grayscale (H,W)/(H,W,1) uint8 input. Not thread-safe
     (the scratch buffers are reused per call); use one FrameGate per stream."""
 
-    def __init__(self, cfg: GateConfig = None):
+    def __init__(self, cfg: Optional[GateConfig] = None):
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
         self._stats = ts.StatsComputer(
@@ -201,8 +197,8 @@ class FrameGate:
         )
         self._struct = ss.StructComputer(
             shape=(t, t),
-            grid=[(e, e) for e in self.cfg.pyramid_exps],  # cells align 1:1 with _stats
-            stride=self.cfg.stride,
+            grid=[(self.cfg.grid_exp, self.cfg.grid_exp)],  # finest only; cells align
+            stride=self.cfg.stride,  # 1:1 with the moment grid. no signal uses coarser
         )
         self._bgr = np.empty(
             (t, t, 3), np.uint8
@@ -210,7 +206,7 @@ class FrameGate:
         self._gray = np.empty((t, t), np.uint8)
         self._hsv = np.empty((t, t, 3), np.uint8)
 
-    def _to_hsv(self, frame: np.ndarray, keep: bool):
+    def _to_hsv(self, frame: np.ndarray, keep: bool) -> tuple:
         """Resize to the thumbnail and produce HSV. Grayscale becomes H=S=0, V=luma,
         so colour signals correctly read as zero. With `keep`, outputs are fresh
         arrays the caller can hold; otherwise reused scratch buffers."""

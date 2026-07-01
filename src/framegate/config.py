@@ -18,6 +18,10 @@ from dataclasses import dataclass, fields, replace
 import yaml
 
 
+def _yaml_val(v):
+    return str(v).lower() if isinstance(v, bool) else v
+
+
 @dataclass(frozen=True)
 class GateConfig:
     # --- frame extraction ---
@@ -26,14 +30,10 @@ class GateConfig:
     grid_exp: int = 5  # 2^grid_exp cells/dim (5 -> 32x32); output/finest level
     n_levels: int = 4  # dyadic pyramid levels from grid_exp (5,4,3,2 -> 32..4)
     solid_thresh: float = 1.0  # blank if max V cell-variance < this
-    edge_thresh: float = (
-        1000.0  # ...or if max cell edge-energy < this (structure check)
-    )
+    edge_thresh: float = 1000.0  # ...or if max cell edge-energy < this
 
     # --- cut score ---
     shift_search: int = 3  # motion-compensation radius in cells
-    cut_w_luma: float = 1.0  # weight of the luma-structure path
-    cut_w_color: float = 1.0  # weight of the global colour-shift path
     ncc_flattol: float = 1.0  # luma std below this -> no structure, skip luma path
     color_maxd: float = 2.0  # max normalized chroma-vector distance (colour path)
     fast_static: bool = True  # skip shift search when zero-shift corr already high
@@ -52,15 +52,13 @@ class GateConfig:
     fade_win: int = 8  # frames over which a fade ramp is measured
     fade_span: float = 60.0  # V-mean change treated as a full fade
 
-    # --- fine-texture map ---
+    # --- text map ---
     text_achromatic_w: float = 0.5  # down-weight saturated cells (achromatic prior)
     text_coarse_k: int = 3  # neighborhood for the coarse between-cell energy
     text_line_k: int = 5  # horizontal smoothing window (text-line coherence)
-    text_skew_w: float = 0.6  # strength of the bimodality (|skew|) gate, 0 = off
+    text_skew_w: float = 0.8  # bimodality gate: suppress symmetric clutter, 0=off
     text_skew_ref: float = 1.2  # |standardized skew| at which the gate saturates
-    text_coherence_w: float = (
-        0.6  # isotropy gate: suppress coherent oriented edges/rules, 0 = off
-    )
+    text_coherence_w: float = 0.8  # isotropy gate: suppress oriented edges, 0=off
 
     # --- saliency map ---
     sal_surround: int = 7  # neighborhood (cells) for the center-surround luma contrast
@@ -82,8 +80,8 @@ class GateConfig:
 
     @property
     def pyramid_exps(self) -> list:
-        """Per-level spatial cell-exponents, finest->coarsest: [grid_exp .. grid_exp-n_levels+1].
-        Level 0 is the finest (output-map) grid; coarser levels feed multi-scale signals.
+        """Per-level cell-exponents, finest->coarsest: [grid_exp .. grid_exp-n_levels].
+        Level 0 is the finest (output) grid; coarser levels feed multi-scale signals.
         """
         exps = [self.grid_exp - i for i in range(self.n_levels)]
         if exps[-1] < 0:
@@ -94,10 +92,10 @@ class GateConfig:
 
     @classmethod
     def from_yaml(cls, path=None, **overrides) -> "GateConfig":
-        """Build from a YAML file plus optional code overrides. With no path, returns the
+        """Build from a YAML file plus optional code overrides. With no path, return the
         library defaults (overrides still apply) -- no file is read."""
         if path is None:
-            data = {}
+            data: dict = {}
         else:
             with open(path) as f:
                 data = yaml.safe_load(f) or {}
@@ -109,16 +107,13 @@ class GateConfig:
 
     @classmethod
     def to_yaml(cls) -> str:
-        """A YAML template generated from the live dataclass defaults -- the single source
+        """A YAML template generated from the live dataclass defaults -- one source
         of truth, so it cannot drift. Copy, edit, and load with from_yaml(path)."""
         head = (
             "# framegate config template (generated from GateConfig defaults).\n"
             "# See the GateConfig dataclass for what each key does.\n\n"
         )
-        lines = [
-            f"{f.name}: {str(f.default).lower() if isinstance(f.default, bool) else f.default}"
-            for f in fields(cls)
-        ]
+        lines = [f"{f.name}: {_yaml_val(f.default)}" for f in fields(cls)]
         return head + "\n".join(lines) + "\n"
 
     def replace(self, **overrides) -> "GateConfig":

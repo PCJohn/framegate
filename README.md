@@ -281,9 +281,6 @@ gains a float32 output mode, that copy disappears.
 
 By design, no optimization changes any output:
 
-- **Blank -> skip FAST.** A statistically flat frame has no corners, so the corner
-  check is skipped. The check itself runs on a `fast_thumb` subsample of the luma (the
-  blank decision only needs corner *presence*, not full resolution). Bit-exact.
 - **Duplicate → reuse stats.** Byte-identical consecutive frames reuse the previous
   result (identical input ⇒ identical stats), gated by a cheap strided pre-check so
   distinct frames pay only microseconds. Toggle with `skip_duplicates`.
@@ -336,9 +333,9 @@ What moves the number, from `examples/benchmark.py` (figures below are the charg
 - **`grid_exp` scales gently:** 16×16 ≈ 1.34 ms, 32×32 ≈ 1.44 ms, 64×64 ≈ 1.64 ms.
   `grid_exp=7` (128×128) exceeds tensorstats' int16 cell limit.
 
-The heavy pixel work (moments, FAST) is native; the rest is small-array numpy. Buffers are
-preallocated and reused, work is float32, the rolling baseline uses a sort instead of
-`np.median`, derived maps are cached, and all array outputs are lazy.
+The heavy pixel work (moments, structure tensor) is native; the rest is small-array numpy.
+Buffers are preallocated and reused, work is float32, the rolling baseline uses a sort
+instead of `np.median`, derived maps are cached, and all array outputs are lazy.
 
 ### Tuning for latency
 

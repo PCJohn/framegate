@@ -44,7 +44,6 @@ def test_pan_produces_no_false_cut():
     assert _cuts(pan) == []
 
 
-
 def test_blank_and_white_flash_are_blank_not_cut():
     c = synth.hsv_scene(60, 2)
     white = np.full((128, 128, 3), 255, np.uint8)

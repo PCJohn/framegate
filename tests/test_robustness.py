@@ -4,6 +4,7 @@ config sweeps (grid / stride / thumb). The goal is to exercise the gate on the k
 of frames real pipelines actually throw at it and assert nothing crashes or goes
 out of range."""
 
+import cv2
 import numpy as np
 import pytest
 
@@ -181,24 +182,110 @@ def test_text_bimodality_suppresses_isotropic_clutter():
 
 
 def test_text_isotropy_gate_suppresses_oriented_patterns():
-    """Coherent oriented patterns (parallel stripes, horizontal rules) are bimodal,
-    fine, achromatic -- they fool the moment cues -- but have high gradient coherence.
-    The isotropy gate suppresses them. Without it (coh_w=0) stripes outscore real text;
-    with it, text wins and both patterns are strongly cut down."""
-    txt, stripes, rules = synth.text_block(), synth.stripes(period=4), synth.rules()
+    """The isotropy (coherence) gate's unique job: suppress *asymmetric* coherent
+    patterns -- horizontal rules on paper -- that the bimodality gate cannot touch
+    (rules are sparse-dark-on-light, so their |skew| is high, like text). Without the
+    gate, rules outscore text; with it, text wins. Symmetric coherent patterns (stripes)
+    are already handled by the bimodality gate, so they are a softer check."""
+    txt, rules, stripes = synth.text_block(), synth.rules(), synth.stripes(period=4)
     on, off = GateConfig(), GateConfig(text_coherence_w=0.0)
 
-    t_off, s_off, r_off = (
-        Gate(off).image(im).text.max() for im in (txt, stripes, rules)
-    )
-    t_on, s_on, r_on = (Gate(on).image(im).text.max() for im in (txt, stripes, rules))
-
-    assert t_off < s_off  # without the gate, stripes beat text (the bug we fix)
-    assert t_on > s_on  # with it, real text wins
-    assert (
-        s_on < 0.6 * s_off and r_on < 0.6 * r_off
-    )  # both patterns strongly suppressed
+    r_off, r_on = Gate(off).image(rules).text.max(), Gate(on).image(rules).text.max()
+    t_off, t_on = Gate(off).image(txt).text.max(), Gate(on).image(txt).text.max()
+    assert r_off > t_off  # without the gate, asymmetric rules beat text
+    assert t_on > r_on  # with it, real text wins
+    assert r_on < 0.6 * r_off  # rules strongly suppressed
     assert t_on > 0.6 * t_off  # real text only mildly affected
+    assert t_on > Gate(on).image(stripes).text.max()  # stripes handled jointly too
+
+
+def test_text_beats_structured_distractors_across_variations():
+    """Thorough text battery: across fonts, sizes, light/dark polarity, rotation and
+    added noise, the weakest text still outscores every *structured* distractor (stripes,
+    rules, foliage clutter, a single edge, a smooth gradient, a checkerboard, a colour
+    scene). Pure high-amplitude noise is a known exception (see the next test)."""
+    text_variants = [synth.text_block(font=f) for f in range(len(synth.FONTS))] + [
+        synth.text_block(scale=0.4),  # small
+        synth.text_block(scale=0.75),  # large
+        synth.text_block(fg=235, bg=20),  # light on dark
+        synth.text_block(rot=6),  # slightly rotated
+        synth.noisy(synth.text_block(), amp=8),  # with sensor noise
+    ]
+    edge = np.full((256, 256, 3), 40, np.uint8)
+    edge[:, 128:] = 210
+    distractors = [
+        synth.stripes(period=4),
+        synth.rules(),
+        synth.foliage(),
+        edge,
+        synth.gradient(),
+        synth.checkerboard(cell=4),
+        synth.hsv_scene(60, 2),
+    ]
+    g = Gate()
+    text_min = min(float(g.image(t).text.max()) for t in text_variants)
+    distractor_max = max(float(g.image(d).text.max()) for d in distractors)
+    assert text_min > 1.3 * distractor_max
+
+
+def test_text_pure_noise_is_a_known_limitation():
+    """Documented limitation: full-range per-pixel noise scores comparably to text --
+    separating them needs stroke-level analysis (connected components / stroke width),
+    out of scope for a low-level moment cue. This test pins the current behavior so a
+    future improvement shows up here rather than as a silent regression elsewhere."""
+    g = Gate()
+    text = float(g.image(synth.text_block()).text.max())
+    noise = float(g.image(synth.noise(seed=2)).text.max())
+    assert (
+        noise > 0.5 * text
+    )  # noise is NOT reliably separable (a would-be false positive)
+
+
+def test_text_is_low_on_non_text():
+    g = Gate()
+    for img in (
+        synth.solid(128),
+        synth.gradient(),
+        synth.black(),
+        synth.hsv_scene(60, 2),
+    ):
+        assert float(g.image(img).text.max()) < 12.0  # no strong response on non-text
+
+
+@pytest.mark.parametrize(
+    "img, want_blank",
+    [
+        (synth.solid(128), True),  # uniform grey
+        (synth.solid((0, 0, 0)), True),  # pure black
+        (synth.solid((255, 255, 255)), True),  # pure white
+        (synth.gradient(), True),  # smooth ramp: no edge energy
+        (synth.noisy(synth.solid(128), amp=3), True),  # faint sensor noise on flat
+        (synth.checkerboard(cell=16), True),  # cells inside squares -> flat cells
+        (synth.noise(seed=3), False),  # full-range texture -> content
+        (
+            synth.noisy(synth.stripes(period=4)),
+            False,
+        ),  # fine periodic texture -> content
+        (synth.text_block(size=128), False),  # text -> content
+        (synth.hsv_scene(60, 2), False),  # natural scene -> content
+    ],
+)
+def test_blank_classification_battery(img, want_blank):
+    assert Gate().image(img).blank is want_blank
+
+
+def test_blank_single_hot_cell_is_not_blank():
+    # a nearly-flat frame with one small high-contrast patch is trackable content.
+    img = np.full((128, 128, 3), 128, np.uint8)
+    img[40:56, 40:56] = synth.noisy(synth.hsv_scene(60, 2))[40:56, 40:56]
+    assert Gate().image(img).blank is False
+
+
+def test_blank_grayscale_and_color_paths_agree():
+    scene = synth.hsv_scene(60, 2)
+    gray = cv2.cvtColor(scene, cv2.COLOR_BGR2GRAY)
+    assert Gate().image(gray).blank is Gate().image(scene).blank is False
+    assert Gate().image(np.full((128, 128), 90, np.uint8)).blank is True  # flat gray
 
 
 def test_saliency_localizes_a_distinct_patch():
