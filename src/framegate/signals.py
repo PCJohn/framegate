@@ -17,6 +17,10 @@ M_MEAN, M_VAR, M_M3, M_M4 = 0, 1, 2, 3
 # structstats.features() channel layout (ss.FEATURES order).
 SE_ENERGY, SE_COH, SE_OC, SE_OS, SE_CORN = 0, 1, 2, 3, 4
 
+# Orientation-vector change (illumination-invariant) at which a cell's motion is treated
+# as fully structure-corroborated; clear object motion produces ~0.3-0.4, lighting ~0.
+MOTION_ORI_REF = 0.2
+
 
 def zscore(x: np.ndarray) -> np.ndarray:
     s = x.std()
@@ -59,16 +63,28 @@ def best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
     return float(corr[k]), k // n - s, k % n - s
 
 
-def saliency_map(grid_V, grid_S, surround_k: int) -> np.ndarray:
-    """Coarse (G,G) appearance saliency from per-cell stats: V-variance (texture) +
-    S-mean (colorfulness) + center-surround luma contrast, z-scored, averaged, clipped
-    at 0. The luma term is |V-mean - local mean| over a `surround_k` neighborhood (a box
-    blur), so a cell is judged against its surround rather than the global frame mean --
-    the standard bottom-up center-surround principle. Per-frame; motion is separate.
+def saliency_map(grid_V, grid_S, struct, surround_k: int) -> np.ndarray:
+    """Coarse (G,G) bottom-up saliency, Itti-Koch style: z-scored feature channels
+    averaged and clipped at 0. Channels: V-variance (texture), S-mean (colourfulness),
+    luma center-surround contrast, cornerness (interest points), and orientation contrast
+    -- a cell whose dominant edge orientation differs from its surround pops out (center-
+    surround on the coherence-weighted double-angle vector), the classic orientation
+    pop-out that intensity/colour channels are blind to. `struct` is the finest structstats
+    grid (G,G,5). Center-surround uses a `surround_k` box (a cell vs its neighborhood).
     """
     vmean = grid_V[:, :, M_MEAN].astype(np.float32)
     v_con = np.abs(vmean - box(vmean, surround_k, surround_k))
-    feats = [zscore(grid_V[:, :, M_VAR]), zscore(grid_S[:, :, M_MEAN]), zscore(v_con)]
+    oc, os = struct[:, :, SE_OC], struct[:, :, SE_OS]
+    ori_con = np.hypot(
+        oc - box(oc, surround_k, surround_k), os - box(os, surround_k, surround_k)
+    )
+    feats = [
+        zscore(grid_V[:, :, M_VAR]),
+        zscore(grid_S[:, :, M_MEAN]),
+        zscore(v_con),
+        zscore(struct[:, :, SE_CORN]),
+        zscore(ori_con),
+    ]
     return np.mean(feats, axis=0).clip(min=0).astype(np.float32)
 
 

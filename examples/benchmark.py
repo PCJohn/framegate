@@ -65,11 +65,22 @@ def _frames_from_video(path, n=300):
 
 
 def _read_maps(g):
+    names = (
+        "saliency",
+        "text",
+        "focus",
+        "structure_type",
+        "edge_energy",
+        "coherence",
+        "cornerness",
+        "orientation",
+        "motion",
+    )
+
     def f(frame):
         fs, _ = g.frame(frame)
-        fs.saliency
-        fs.text
-        _ = fs.motion
+        for n in names:
+            _ = getattr(fs, n)
 
     return f
 

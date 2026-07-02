@@ -118,6 +118,20 @@ def foliage(size=256, seed=1):
     return cv2.cvtColor(g, cv2.COLOR_GRAY2BGR)
 
 
+def orientation_popout(size=256, band=3, patch=(96, 160)):
+    """A field of horizontal stripes with a square patch of vertical stripes, identical
+    in contrast, mean and colour -- a classic orientation pop-out: salient to humans and
+    to an orientation-contrast channel, invisible to intensity/colour/variance channels.
+    """
+    col = ((np.arange(size) // band) % 2 * 180 + 40).astype(np.uint8)
+    horiz = np.tile(col[:, None], (1, size))
+    vert = np.tile(col[None, :], (size, 1))
+    img = horiz.copy()
+    a, b = patch
+    img[a:b, a:b] = vert[a:b, a:b]
+    return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+
 def stripes(size=THUMB, period=4, horizontal=True):
     """Fine achromatic line pattern (text-like high-frequency horizontal texture)."""
     idx = (np.arange(size) // (period // 2)) % 2 * 255

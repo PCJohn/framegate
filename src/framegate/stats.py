@@ -39,8 +39,11 @@ class FrameStats:
         None  # (G,G) photometric change vs the previous frame;
     )
     #   set by StreamAnalyzer, None for a standalone image or the first/post-blank frame
+    ori_change: Optional[np.ndarray] = (
+        None  # (G,G) ||d(edge orientation vector)|| vs prev; illumination-invariant
+    )
     struct: Optional[dict] = (
-        None  # structstats.features(V): "grid_0" (G,G,5) + "global" (5,)
+        None  # structstats.features(V): per-level (cells,cells,5) + "global" (5,)
     )
 
     # --- per-channel grids (views; raw moments) ---
@@ -100,7 +103,9 @@ class FrameStats:
     # --- derived maps (cached: pure per-frame, so a duplicate frame reuses them) ---
     @cached_property
     def saliency(self) -> np.ndarray:
-        return S.saliency_map(self.grid_V, self.grid_S, self.cfg.sal_surround)
+        return S.saliency_map(
+            self.grid_V, self.grid_S, self.struct["grid_0"], self.cfg.sal_surround
+        )
 
     @cached_property
     def text(self) -> np.ndarray:
@@ -123,21 +128,29 @@ class FrameStats:
     @property
     def motion(self) -> Optional[np.ndarray]:
         """(G,G) motion magnitude vs the previous frame: |residual| (after removing
-        global gain/bias) minus a noise floor, or None for a still image / first /
-        post-blank frame. The floor is the larger of a relative local term
-        (motion_floor_k * local-mean |residual| over motion_surround cells) and an
-        absolute term (motion_abs_floor grey levels); set both to 0 for raw magnitude.
-        The signed change is always in `residual`."""
+        global gain/bias) minus a noise floor, then structurally validated -- or None
+        for a still image / first / post-blank frame. The floor is the larger of a
+        relative local term (motion_floor_k * local-mean |residual| over motion_surround
+        cells) and an absolute term (motion_abs_floor grey levels). Structural validation
+        (motion_struct_w) down-weights cells whose luma changed but whose *edge
+        orientation* did not: real motion moves edges, whereas a regional lighting/shadow
+        shift scales gradients without reorienting them (orientation is illumination-
+        invariant), so it is suppressed. Set the floors and motion_struct_w to 0 for the
+        raw magnitude; the signed change is always in `residual`."""
         if self.residual is None:
             return None
         m = np.abs(self.residual)
         floor = self.cfg.motion_abs_floor
         if self.cfg.motion_floor_k > 0.0:
             local = S.box(m, self.cfg.motion_surround, self.cfg.motion_surround)
-            return np.maximum(
-                m - np.maximum(self.cfg.motion_floor_k * local, floor), 0.0
-            )
-        return np.maximum(m - floor, 0.0)
+            m = np.maximum(m - np.maximum(self.cfg.motion_floor_k * local, floor), 0.0)
+        else:
+            m = np.maximum(m - floor, 0.0)
+        if self.cfg.motion_struct_w > 0.0 and self.ori_change is not None:
+            conf = np.minimum(self.ori_change / S.MOTION_ORI_REF, 1.0)
+            w = self.cfg.motion_struct_w
+            m = m * ((1.0 - w) + w * conf)
+        return m
 
     @cached_property
     def color_mean(self) -> np.ndarray:
@@ -176,8 +189,54 @@ class FrameStats:
 
     @property
     def sharpness(self) -> float:
-        """Global gradient energy (log1p) -- a scalar focus/detail proxy."""
+        """Global gradient energy (log1p) -- a scalar detail/contrast proxy."""
         return float(np.log1p(self.struct["global"][S.SE_ENERGY]))
+
+    @cached_property
+    def focus(self) -> np.ndarray:
+        """(G,G) edge sharpness = gradient energy per unit intensity variance
+        (~1/edge-width^2), contrast-independent: high where edges are crisp, low where
+        blurred or flat -- a per-cell focus/defocus map. Unlike `sharpness` (raw energy),
+        it is invariant to contrast, so it tracks focus pulls and depth-of-field, not how
+        much detail or how bright the frame is."""
+        return self.edge_energy / (self.v_cell_var + self.cfg.solid_thresh)
+
+    @cached_property
+    def structure_type(self) -> np.ndarray:
+        """(G,G,3) soft structural decomposition [flat, edge, structured], summing to 1,
+        from the per-cell structure tensor. `presence = e/(e+edge_thresh)` is how much
+        gradient a cell has (0 flat .. 1 strong); among present cells, coherence splits a
+        single dominant edge (high) from 2-D structure -- corners and isotropic texture,
+        which share the eigenvalue signature (low). `argmax(-1)` gives a hard label.
+        Corner vs texture is not separable at one scale (the tensor has only two
+        eigenvalue DoF: cornerness == energy*(1-coherence)/2), so they merge here."""
+        e, coh = self.edge_energy, self.coherence
+        presence = e / (e + self.cfg.edge_thresh)
+        return np.stack(
+            [1.0 - presence, presence * coh, presence * (1.0 - coh)], axis=-1
+        ).astype(np.float32)
+
+    # --- global scene-structure descriptors (scalars from the frame-wide tensor) ---
+    @property
+    def orientedness(self) -> float:
+        """Global edge anisotropy in [0,1]: 1 = the whole frame shares one dominant edge
+        orientation (architecture, horizon), ~0 = isotropic (natural/busy scenes)."""
+        return float(self.struct["global"][S.SE_COH])
+
+    @property
+    def dominant_orientation(self) -> float:
+        """Frame-global dominant edge orientation in radians (-pi/2, pi/2]; meaningful
+        only when `orientedness` is high."""
+        gv = self.struct["global"]
+        return float(0.5 * np.arctan2(gv[S.SE_OS], gv[S.SE_OC]))
+
+    @cached_property
+    def structure_profile(self) -> np.ndarray:
+        """(3,) frame-level [flat, edge, structured] fractions -- a compact scene
+        signature (mean of structure_type over cells). Graphics/documents/UI skew toward
+        flat+edge (clean geometry); natural photos skew structured (isotropic texture).
+        """
+        return self.structure_type.reshape(-1, 3).mean(0)
 
 
 class FrameGate:
@@ -197,8 +256,8 @@ class FrameGate:
         )
         self._struct = ss.StructComputer(
             shape=(t, t),
-            grid=[(self.cfg.grid_exp, self.cfg.grid_exp)],  # finest only; cells align
-            stride=self.cfg.stride,  # 1:1 with the moment grid. no signal uses coarser
+            grid=[(e, e) for e in self.cfg.pyramid_exps],  # cells align 1:1 with _stats
+            stride=self.cfg.stride,
         )
         self._bgr = np.empty(
             (t, t, 3), np.uint8

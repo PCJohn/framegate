@@ -67,6 +67,9 @@ class GateConfig:
     motion_floor_k: float = 1.0  # k*local-mean|residual| noise floor (0 = off)
     motion_surround: int = 7  # neighborhood (cells) for that local floor
     motion_abs_floor: float = 1.0  # absolute grey-level floor (0 = off)
+    motion_struct_w: float = (
+        0.7  # down-weight luma change with no edge motion (0 = off)
+    )
 
     # --- output ---
     return_frames: bool = True  # attach thumb+HSV to FrameStats for caller reuse

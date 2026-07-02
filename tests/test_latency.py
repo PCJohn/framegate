@@ -58,9 +58,18 @@ def test_frame_with_maps_under_budget(frames_1080p, capsys):
 
     def read_maps(f):
         fs, _ = g.frame(f)
-        fs.saliency
-        fs.text
-        _ = fs.motion
+        for name in (
+            "saliency",
+            "text",
+            "focus",
+            "structure_type",
+            "edge_energy",
+            "coherence",
+            "cornerness",
+            "orientation",
+            "motion",
+        ):
+            _ = getattr(fs, name)
 
     ms = _bench(read_maps, frames_1080p)
     with capsys.disabled():

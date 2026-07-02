@@ -127,7 +127,12 @@ Single-frame (`FrameStats`, available for images and video):
 | `coherence`      | (G×G) edge anisotropy in [0,1]; 1 = a single dominant orientation. |
 | `cornerness`     | (G×G) Shi-Tomasi corner strength (smaller structure-tensor eigenvalue). |
 | `orientation`    | (G×G) dominant edge orientation in radians; reliability is `coherence`. |
-| `sharpness`      | Scalar global gradient energy (`log1p`); a cheap focus/detail proxy. |
+| `sharpness`      | Scalar global gradient energy (`log1p`); raw detail/contrast. |
+| `focus`          | (G×G) edge sharpness = energy / variance (≈1/edge-width²); contrast-independent focus/defocus map. |
+| `structure_type` | (G×G×3) soft `[flat, edge, structured]` (sums to 1); `argmax` for a hard label. |
+| `orientedness`   | Scalar global edge anisotropy [0,1]; high = one dominant frame-wide orientation. |
+| `dominant_orientation` | Scalar frame-wide edge orientation (radians); meaningful when `orientedness` is high. |
+| `structure_profile` | (3,) frame-level flat/edge/structured fractions; a compact scene signature. |
 | `motion`         | (G×G) motion magnitude vs the previous frame, or `None` for a still image (video only). |
 
 Temporal (`TemporalSignals`, video only):
@@ -163,9 +168,12 @@ as a region (threshold, connected components, top-k cells, your own model on the
 is application-specific, so the library stays a pure, fast descriptor rather than baking in
 one opinionated ROI policy:
 
-- **`saliency`** — `(G×G)` appearance saliency: z-scored V-variance (texture) + S-mean
-  (colorfulness) + center-surround luma contrast (each cell vs its local neighborhood,
-  `sal_surround`), averaged and clipped at 0. Purely per-frame.
+- **`saliency`** — `(G×G)` bottom-up saliency (Itti-Koch style): z-scored channels for
+  V-variance (texture), S-mean (colourfulness), center-surround luma contrast, cornerness
+  (interest points), and orientation contrast (a cell whose dominant edge orientation
+  differs from its surround — the classic orientation pop-out that intensity/colour
+  channels miss), averaged and clipped at 0. Center-surround uses a `sal_surround` box.
+  Purely per-frame.
 - **`text`** — `(G×G)` text likelihood from low-level texture: fine achromatic
   high-frequency contrast in horizontal runs, gated by two orthogonal cues. The first is
   per-cell distribution asymmetry (text is bimodal -- sparse ink on paper -- so its
@@ -183,7 +191,23 @@ one opinionated ROI policy:
   computed over the same V plane and the same cells in one extra pass. They read the *gradient
   layout* the intensity moments are blind to: how much edge energy a cell has, whether it is
   anisotropic (one dominant edge) or isotropic clutter, whether it contains a corner, and the
-  edge direction. `sharpness` is the global-energy scalar (a focus/detail proxy).
+  edge direction. `sharpness` is the global-energy scalar (raw detail/contrast).
+- **`focus`** — `(G×G)` edge sharpness = gradient energy per unit intensity variance
+  (≈ 1/edge-width²), *contrast-independent*: high where edges are crisp, low where blurred
+  or flat. A per-cell focus/defocus and depth-of-field map (unlike `sharpness`, invariant to
+  contrast and brightness). Free — reuses the energy and variance already computed.
+- **`structure_type`** — `(G×G×3)` soft decomposition `[flat, edge, structured]` summing to 1,
+  from the per-cell structure tensor: `presence = energy/(energy+edge_thresh)` (flat vs not),
+  then coherence splits a single dominant edge from 2-D structure. `argmax(-1)` gives a hard
+  label. Corner and isotropic texture share the eigenvalue signature (the tensor has only two
+  eigenvalue DoF — `cornerness == energy·(1−coherence)/2`), so they honestly merge into
+  `structured` rather than faking a fourth class.
+- **global scene descriptors** — `orientedness` (∈[0,1], global edge anisotropy: high for
+  architecture/horizons, ~0 for natural/busy scenes), `dominant_orientation` (radians, the
+  frame-wide edge direction, meaningful when `orientedness` is high), and `structure_profile`
+  (`(3,)` frame-level flat/edge/structured fractions). Together these give a cheap
+  graphic-vs-photographic prior: graphics/documents skew flat+edge with high orientedness,
+  natural photos skew structured with low orientedness.
 
 All three are `(G×G)` (`G = 2**grid_exp`, default 32) at thumbnail scale; multiply cell
 indices by `shape / G` to map back to source pixels. `saliency` and `text` are
@@ -203,6 +227,17 @@ guarantees that sub-grey-level change — averaged over a ~60×60-px cell, that 
 sensor/compression dither — reads as no motion on any frame. Set both to 0 for the raw
 magnitude. The signed residual is always available as `stats.residual` if you want it before
 the absolute value and floor.
+
+After the floor, motion is **structurally validated** (`motion_struct_w`, default 0.7): each
+cell is down-weighted by how much its dominant edge *orientation* changed versus the previous
+frame. Orientation (the coherence-weighted double-angle vector from structstats) is
+illumination-invariant — brightening a region scales all its gradients equally without
+reorienting them — so a regional lighting or shadow shift, which the global affine cannot
+absorb, produces luma residual but ~zero orientation change and is suppressed, whereas real
+motion moves edges and is kept. In practice this cuts a regional-shadow false response to ~⅓
+while leaving genuine motion ~intact. The trade is the aperture case: a uniform region moving
+over a uniform background has no orientation change in its interior, so (like the local floor)
+this favors motion boundaries; set `motion_struct_w = 0` to disable.
 
 Note the trade the local (center-surround) term makes: it favors motion **boundaries** over
 filled interiors, so a large, smoothly-moving region is partly hollowed while its edges remain.

@@ -7,9 +7,9 @@ out of range."""
 import cv2
 import numpy as np
 import pytest
+import synth
 
 from framegate import Gate, GateConfig
-import synth
 
 G = GateConfig().grid_size
 
@@ -288,6 +288,102 @@ def test_blank_grayscale_and_color_paths_agree():
     assert Gate().image(np.full((128, 128), 90, np.uint8)).blank is True  # flat gray
 
 
+_SCALAR_SIGNALS = [
+    "exposure",
+    "contrast",
+    "colorfulness",
+    "detail",
+    "flat_fraction",
+    "noise_floor",
+    "clipping",
+    "sharpness",
+    "orientedness",
+    "dominant_orientation",
+]
+_MAP_SIGNALS = [
+    "saliency",
+    "text",
+    "edge_energy",
+    "coherence",
+    "cornerness",
+    "orientation",
+    "focus",
+    "v_cell_mean",
+    "v_cell_var",
+]
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        GateConfig(),
+        GateConfig(grid_exp=4),
+        GateConfig(grid_exp=6),
+        GateConfig(thumb=96),
+        GateConfig(n_levels=1),
+    ],
+)
+def test_all_signals_finite_and_shaped(cfg):
+    """Every per-frame signal is finite and correctly shaped across configs and a wide
+    input battery -- solid, black, full noise, natural scene, text, a grayscale frame,
+    and a tiny frame. Guards broadly against NaN / shape regressions (empty reductions,
+    divide-by-zero) in any signal, including the structural ones."""
+    G = cfg.grid_size
+    inputs = [
+        synth.solid(128),
+        synth.black(),
+        synth.noise(seed=1),
+        synth.hsv_scene(60, 2),
+        synth.text_block(size=128),
+        cv2.cvtColor(synth.hsv_scene(60, 2), cv2.COLOR_BGR2GRAY),  # grayscale path
+        np.full((6, 6, 3), 128, np.uint8),  # tiny frame (upsized to thumb)
+    ]
+    for img in inputs:
+        fs = Gate(cfg).image(img)
+        for name in _SCALAR_SIGNALS:
+            v = getattr(fs, name)
+            assert isinstance(v, float) and np.isfinite(v), (name, v)
+        for name in _MAP_SIGNALS:
+            m = getattr(fs, name)
+            assert m.shape == (G, G) and np.isfinite(m).all(), name
+        assert fs.structure_type.shape == (G, G, 3)
+        assert np.isfinite(fs.structure_type).all()
+        assert np.allclose(fs.structure_type.sum(-1), 1.0, atol=1e-4)
+        assert fs.structure_profile.shape == (3,)
+        assert fs.color_mean.shape == (3,) and np.isfinite(fs.color_mean).all()
+
+
+def test_stream_with_midstream_blank_is_stable():
+    """A blank stretch mid-stream resets cleanly: signals stay finite, and the first
+    frame after the blank has motion=None (no previous frame to diff), exercising the
+    orientation-change reset added for structural motion validation."""
+    g = Gate()
+    pre = [synth.noisy(synth.hsv_scene(60, 2)) for _ in range(4)]
+    blank = [synth.white(), synth.black()]
+    post = [synth.noisy(synth.hsv_scene(200, 7)) for _ in range(4)]
+    motions = []
+    for f in pre + blank + post:
+        fs, s = g.frame(f)
+        assert np.isfinite(s.cut_score)
+        if fs.motion is not None:
+            assert np.isfinite(fs.motion).all()
+        motions.append(fs.motion)
+    assert motions[len(pre + blank)] is None  # first post-blank frame has no motion
+    assert motions[-1] is not None  # tracking resumes after
+
+
+def test_saliency_orientation_popout():
+    """A patch oriented differently from its surround -- same luma, colour and contrast
+    -- pops out via the orientation-contrast channel. Intensity/colour/variance channels
+    are blind to it (they rank it at or below background), so this exercises the specific
+    channel the structure features add."""
+    fs = Gate().image(synth.orientation_popout())
+    sal = fs.saliency
+    patch = sal[12:20, 12:20].mean()  # vertical-stripe patch (grid cells ~12..20)
+    bg = sal[2:10, 2:10].mean()  # horizontal-stripe surround
+    assert patch > 3.0 * (bg + 1e-6)
+
+
 def test_saliency_localizes_a_distinct_patch():
     f = synth.solid((50, 50, 50))
     f[40:90, 40:90] = np.random.default_rng(0).integers(150, 255, (50, 50, 3))
@@ -412,8 +508,35 @@ def test_thumb_sweep_runs(thumb):
     assert fs.saliency.shape == (G, G)
 
 
+def test_motion_structural_validation_rejects_photometric_not_real_motion():
+    """A regional lighting/shadow shift (luma changes, edges do not move) reads as much
+    less motion than genuine content motion. Orientation is illumination-invariant, so
+    the structural validation suppresses the photometric change while leaving real
+    (edge-moving) motion essentially intact."""
+    base = synth.noisy(synth.hsv_scene(60, 2), amp=2)
+    w = base.shape[1]
+    shadow = np.clip(
+        base.astype(np.int16) - np.where(np.arange(w)[None, :, None] < w // 2, 40, 0),
+        0,
+        255,
+    ).astype(np.uint8)
+    moved = np.roll(base, 6, axis=1)
+
+    def motion(second, struct_w):
+        g = Gate(GateConfig(motion_struct_w=struct_w))
+        g.frame(base)
+        return g.frame(second)[0].motion
+
+    assert (
+        motion(shadow, 0.7).mean() < 0.6 * motion(shadow, 0.0).mean()
+    )  # photometric cut
+    assert (
+        motion(moved, 0.7).mean() > 0.8 * motion(moved, 0.0).mean()
+    )  # real motion kept
+
+
 def test_motion_raw_when_floors_disabled():
-    cfg = GateConfig(motion_floor_k=0.0, motion_abs_floor=0.0)
+    cfg = GateConfig(motion_floor_k=0.0, motion_abs_floor=0.0, motion_struct_w=0.0)
     g = Gate(cfg)
     fs = None
     for x in range(4, 40, 4):

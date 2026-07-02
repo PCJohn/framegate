@@ -3,7 +3,7 @@
 
     python examples/visualize.py path/to/video.mp4
 
-Shows the appearance maps (motion / saliency / fine-texture), the exact per-cell
+Shows the appearance maps (motion / saliency / text / focus / structure), the per-cell
 moment grids, the temporal event signals (cut / fade / flicker / struct-corr),
 and a live latency panel separating framegate compute from matplotlib render --
 so the speed of the package is visible against the cost of just drawing it.
@@ -28,7 +28,7 @@ DISPLAY_MAX = 480  # longest side of the displayed frame
 LAT_WIN = 30  # frames to average for the latency readout
 # Fixed display ranges for the map panels, so a near-static frame stays dark
 # instead of auto-stretching its noise floor to full brightness.
-MAP_VMAX = {"motion": 32.0, "saliency": 3.0, "texture": 24.0}
+MAP_VMAX = {"motion": 32.0, "saliency": 3.0, "texture": 24.0, "focus": 30.0}
 
 
 def heat(ax, title, cmap, clim=None):
@@ -48,8 +48,8 @@ def tseries(ax, title, labels, colors):
     ax.set_xlim(0, HISTORY)
     ax.tick_params(labelsize=6)
     lns = [
-        ax.plot(np.zeros(HISTORY), lw=1.0, color=c, label=l)[0]
-        for l, c in zip(labels, colors)
+        ax.plot(np.zeros(HISTORY), lw=1.0, color=c, label=lab)[0]
+        for lab, c in zip(labels, colors)
     ]
     if len(labels) > 1:
         ax.legend(fontsize=6, loc="upper left", ncol=len(labels), framealpha=0.4)
@@ -68,9 +68,9 @@ def run(src):
     gate = Gate()
     g = gate.cfg.grid_size
 
-    fig = plt.figure(figsize=(15, 9))
+    fig = plt.figure(figsize=(17, 9))
     gs = fig.add_gridspec(
-        4, 6, hspace=0.5, wspace=0.3, left=0.04, right=0.99, top=0.93, bottom=0.05
+        4, 7, hspace=0.5, wspace=0.3, left=0.03, right=0.99, top=0.93, bottom=0.05
     )
 
     ax_frame = fig.add_subplot(gs[0:2, 0:3])
@@ -103,6 +103,19 @@ def run(src):
     im_luma = heat(fig.add_subplot(gs[1, 3]), "luma  (V mean)", "inferno")
     im_var = heat(fig.add_subplot(gs[1, 4]), "contrast  (V var)", "viridis")
     im_sat = heat(fig.add_subplot(gs[1, 5]), "saturation  (S mean)", "plasma")
+    im_foc = heat(
+        fig.add_subplot(gs[0, 6]),
+        "focus (edge sharpness)",
+        "bone",
+        (0, MAP_VMAX["focus"]),
+    )
+    ax_st = fig.add_subplot(gs[1, 6])
+    ax_st.set_title("structure  (flat/edge/tex = RGB)", fontsize=8)
+    ax_st.set_xticks([])
+    ax_st.set_yticks([])
+    im_st = ax_st.imshow(
+        np.zeros((2, 2, 3), np.float32), aspect="auto", interpolation="nearest"
+    )
 
     # cut-score timeline with threshold + cut markers
     ax_cut = fig.add_subplot(gs[2, 0:3])
@@ -113,7 +126,7 @@ def run(src):
     ax_cut.axhline(gate.cfg.cut_dissim, color="r", ls=":", lw=0.8)
 
     # latency timeline: framegate compute vs matplotlib render
-    ax_lat = fig.add_subplot(gs[2, 3:6])
+    ax_lat = fig.add_subplot(gs[2, 3:7])
     ln_lat = tseries(
         ax_lat, "framegate latency (ms/frame)", ["core", "core+maps"], ["C0", "C1"]
     )
@@ -125,7 +138,7 @@ def run(src):
         ax_ev, "events", ["struct_corr", "fade", "flicker"], ["C2", "C0", "C4"]
     )
 
-    ax_txt = fig.add_subplot(gs[3, 2:6])
+    ax_txt = fig.add_subplot(gs[3, 2:7])
     ax_txt.axis("off")
     txt = ax_txt.text(
         0.01,
@@ -177,6 +190,8 @@ def run(src):
             _ = (
                 fs.saliency,
                 fs.text,
+                fs.focus,
+                fs.structure_type,
                 motion,
                 fs.grid_V,
                 fs.grid_S,  # force lazy maps
@@ -221,6 +236,8 @@ def run(src):
             im_mot.set_data(motion)
             im_sal.set_data(fs.saliency)
             im_tex.set_data(fs.text)
+            im_foc.set_data(fs.focus)
+            im_st.set_data(fs.structure_type)
             for im, d in (
                 (im_luma, fs.grid_V[:, :, 0]),
                 (im_var, fs.grid_V[:, :, 1]),
@@ -269,7 +286,7 @@ def run(src):
                 f"exposure   {fs.exposure:5.1f}   contrast {fs.contrast:5.1f}\n"
                 f"colorful   {fs.colorfulness:5.1f}   detail   {fs.detail:5.2f}\n"
                 f"noise/clip {fs.noise_floor:5.2f} / {fs.clipping:+.2f}\n"
-                f"flat_frac  {fs.flat_fraction:5.2f}"
+                f"flat_frac  {fs.flat_fraction:5.2f}   oriented {fs.orientedness:.2f}"
             )
 
             fig.suptitle(f"framegate   |   frame {fidx}   |   {src}", fontsize=11)

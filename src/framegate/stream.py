@@ -76,6 +76,9 @@ class StreamAnalyzer:
         self.cfg = cfg or GateConfig()
         self._prev_luma: Optional[np.ndarray] = None  # prev cell-mean luma map (G, G)
         self._prev_color: Optional[np.ndarray] = None  # prev global colour vector (3,)
+        self._prev_ovec: Optional[np.ndarray] = (
+            None  # prev per-cell orientation vec (G,G,2)
+        )
         self._prev_V: Optional[float] = None
         self._roll = _RollingRobust(self.cfg.roll_win, self.cfg.robust_min)
         self._vhist: deque = deque(maxlen=self.cfg.flicker_win)
@@ -91,6 +94,7 @@ class StreamAnalyzer:
 
     def _reset(self):
         self._prev_luma = self._prev_color = self._prev_V = None
+        self._prev_ovec = None
         self._vhist.clear()
         self._s2 = self._s1 = 0.0
         self._o1 = False
@@ -132,6 +136,7 @@ class StreamAnalyzer:
         c = self.cfg
         self._idx += 1
         luma, color, V = fs.v_cell_mean, fs.color_mean, fs.exposure
+        ovec = fs.struct["grid_0"][:, :, S.SE_OC : S.SE_OS + 1]
 
         if fs.blank:
             self._reset()
@@ -139,6 +144,7 @@ class StreamAnalyzer:
         if self._prev_luma is None:
             self._reset()
             self._prev_luma, self._prev_color, self._prev_V = luma, color, V
+            self._prev_ovec = ovec
             self._vhist.append(V)
             self._idx_prev = self._idx
             return TemporalSignals.none()
@@ -147,6 +153,10 @@ class StreamAnalyzer:
         resid_rms = float(np.sqrt((resid**2).mean()))
         dV = V - self._prev_V
         fs.residual = resid  # already (G,G); annotate the frame with its motion
+        fs.ori_change = np.hypot(
+            ovec[:, :, 0] - self._prev_ovec[:, :, 0],
+            ovec[:, :, 1] - self._prev_ovec[:, :, 1],
+        )
 
         cut_score, luma_corr = self._cut_score(
             self._prev_luma, self._prev_color, luma, color
@@ -172,6 +182,7 @@ class StreamAnalyzer:
         )
 
         self._prev_luma, self._prev_color, self._prev_V = luma, color, V
+        self._prev_ovec = ovec
         self._idx_prev = self._idx
         self._cut_cd = 1 if cut else max(0, self._cut_cd - 1)
         self._lock = c.min_scene_len if cut else max(0, self._lock - 1)
