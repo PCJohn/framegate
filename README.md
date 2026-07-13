@@ -30,13 +30,12 @@ for frame in frames:
 
 ## Install
 
-`framegate` depends on [`tensorstats`](https://github.com/PCJohn/tensorstats) for the
-fast moment computation and [`structstats`](https://github.com/PCJohn/structstats) for the
-gradient structure-tensor features. Install both first (neither is on PyPI):
+`framegate` depends on [`imfeat`](https://github.com/PCJohn/imfeat), which computes the
+moments *and* the gradient structure-tensor features in a single pass over the pixels.
+Install it first (it is not on PyPI):
 
 ```bash
-pip install git+https://github.com/PCJohn/tensorstats
-pip install git+https://github.com/PCJohn/structstats
+pip install git+https://github.com/PCJohn/imfeat
 pip install framegate            # add [viz] for the example visualizer, [dev] for tests
 ```
 
@@ -61,7 +60,9 @@ only on access.
 **Under the hood.** Every signal is derived from **exact per-cell central moments**
 (mean, variance, and two higher moments) of the H/S/V channels, computed over a
 `thumb`x`thumb` thumbnail in a single pass by
-[`tensorstats`](https://github.com/PCJohn/tensorstats). The thumbnail is divided into a
+[`imfeat`](https://github.com/PCJohn/imfeat) -- which, in that same pass and on the same
+cells, also computes the gradient structure tensor, an orientation histogram and extrema
+densities, for *every* channel. The thumbnail is divided into a
 `GxG` grid of cells (`G = 2**grid_exp`, default 32); each cell's moments summarize its
 colour and texture, and the signals are cheap combinations of them. The grid is also
 computed at several coarser resolutions in the *same* pass -- a dyadic **pyramid** of
@@ -179,7 +180,7 @@ one opinionated ROI policy:
   per-cell distribution asymmetry (text is bimodal -- sparse ink on paper -- so its
   `|standardized skew|` is high, while isotropic clutter is symmetric and is suppressed).
   The second is gradient *isotropy*: real text mixes stroke orientations within a cell
-  (low structure-tensor coherence, from [`structstats`](https://github.com/PCJohn/structstats)),
+  (low structure-tensor coherence, from [`imfeat`](https://github.com/PCJohn/imfeat)),
   so coherent oriented patterns that survive the high-pass -- single edges, parallel rules,
   fences, hatching -- are suppressed (`text_coherence_w`, 0 = off). Tuned for dense/printed
   text (body text, captions, UI); a cue, not OCR. The one intentional text-specific feature
@@ -187,8 +188,8 @@ one opinionated ROI policy:
 - **`motion`** — `(G×G)` motion magnitude vs the previous frame (`None` for a still image).
   See below.
 - **structure maps** (`edge_energy`, `coherence`, `cornerness`, `orientation`) — `(G×G)`
-  gradient structure-tensor features from [`structstats`](https://github.com/PCJohn/structstats),
-  computed over the same V plane and the same cells in one extra pass. They read the *gradient
+  gradient structure-tensor features from [`imfeat`](https://github.com/PCJohn/imfeat),
+  computed over the same cells in the same pass as the moments. They read the *gradient
   layout* the intensity moments are blind to: how much edge energy a cell has, whether it is
   anisotropic (one dominant edge) or isotropic clutter, whether it contains a corner, and the
   edge direction. `sharpness` is the global-energy scalar (raw detail/contrast).
@@ -230,7 +231,7 @@ the absolute value and floor.
 
 After the floor, motion is **structurally validated** (`motion_struct_w`, default 0.7): each
 cell is down-weighted by how much its dominant edge *orientation* changed versus the previous
-frame. Orientation (the coherence-weighted double-angle vector from structstats) is
+frame. Orientation (the coherence-weighted double-angle vector from imfeat) is
 illumination-invariant — brightening a region scales all its gradients equally without
 reorienting them — so a regional lighting or shadow shift, which the global affine cannot
 absorb, produces luma residual but ~zero orientation change and is suppressed, whereas real
@@ -256,7 +257,7 @@ ink-on-paper distribution that text produces) -- so it is a genuine text *cue*, 
 generic texture descriptor. We make this single exception because text is near-universal
 in real imagery and underpins a large class of downstream applications, and because the
 cue costs nothing beyond the moments already computed (the bimodality gate reuses the
-skew that `tensorstats` returns for free). It is still only a cue, not OCR: it is tuned
+skew that `imfeat` returns for free). It is still only a cue, not OCR: it is tuned
 for dense, achromatic, horizontally-laid-out text (printed body text, captions, dense UI)
 and scores large display or colourful text lower.
 
@@ -309,8 +310,8 @@ of recomputing. They are `None` when the flag is off.
 
 `FrameStats` and `TemporalSignals` are plain dataclasses holding the raw moment
 arrays plus lazy properties; passing them around copies nothing. The one unavoidable
-per-frame copy is the float64→float32 cast of the moment grids — if `tensorstats`
-gains a float32 output mode, that copy disappears.
+per-frame copy is the float64→float32 cast of the moment grids — if `imfeat`
+gains a float32 moment output mode, that copy disappears.
 
 ## Video-level optimization (lossless only)
 
@@ -353,22 +354,29 @@ What moves the number, from `examples/benchmark.py` (figures below are the charg
   `thumb=64` ≈ 0.14 ms, `128` ≈ 0.57 ms, `192` ≈ 1.19 ms, `256` (default) ≈ 1.44 ms.
   This is the first knob to reach for.
 - **Input resolution barely matters** for `image()` (everything downsizes to `thumb`
-  first): ~1.41 ms at 360p rising to only ~1.54 ms at 4K. Larger frames cost more only in
-  the resize, seen mainly in `frame()` (~1.7 ms → ~2.2 ms at 4K). No need to pre-downscale.
-- **`stride` is the second lever:** `stride=1` ≈ 2.32 ms, `2` (default) ≈ 1.44 ms,
-  `3` ≈ 1.02 ms, `4` ≈ 0.81 ms. Note `stride>1` is *not* a uint8 fast path — it switches
-  tensorstats' grid path to an indexed gather over subsampled pixels. For a single grid that
-  gather can cost more than it saves below ~4x, but with the multi-level pyramid the
-  per-pixel scatter into every level dominates, so `stride=2` beats `stride=1` (hence the
-  default). Higher strides subsample more, so they coarsen the per-cell stats and need
-  `cell_px / stride >= 2`.
-- **`n_levels` (pyramid depth):** each coarse level adds ~0.15 ms of per-pixel scatter
-  (`n_levels=1` ≈ 0.99 ms → `4` ≈ 1.45 ms). The coarse levels are nearly free in *passes*
-  but not in compute; request only as many as your signals read.
-- **`grid_exp` scales gently:** 16×16 ≈ 1.34 ms, 32×32 ≈ 1.44 ms, 64×64 ≈ 1.64 ms.
-  `grid_exp=7` (128×128) exceeds tensorstats' int16 cell limit.
+  first): ~0.75 ms at 360p rising to only ~0.88 ms at 4K. Larger frames cost more only in
+  the resize, seen mainly in `frame()` (~0.94 ms → ~1.31 ms at 4K). No need to pre-downscale.
+- **`thumb` is the main lever** — cost is quadratic in it, since it sets the pixel count
+  actually walked: 64 ≈ 0.21 ms, 128 ≈ 0.36 ms, 192 ≈ 0.56 ms, 256 (default) ≈ 0.83 ms.
+- **`stride` is the second lever:** `stride=1` ≈ 1.68 ms, `2` (default) ≈ 0.95 ms,
+  `3` ≈ 0.75 ms, `4` ≈ 0.66 ms. It simply subsamples which pixels the single accumulation
+  loop visits; the gradient stencil and the cell boundaries stay at full resolution, and
+  each cell keeps an identical sample count. What it costs is samples per cell, so the
+  binding constraint is `cell_px / stride >= 4` — at the default (`thumb=256`, `grid_exp=5`
+  → 8 px cells) that caps you at `stride=2`. Past that the structure maps degrade fast
+  (at 4 samples/cell the edge-energy map correlates only ~0.82 with the exact one).
+- **`n_levels` (pyramid depth) is nearly free:** `1` ≈ 0.79 ms → `4` ≈ 0.83 ms. Coarse
+  levels are exact *sums* of the finer cells' accumulators, so depth costs no extra pass
+  and no extra per-pixel work — only the (tiny) reduction over cells. Ask for all of them.
+- **`grid_exp` is cheap up to 32×32:** 16×16 ≈ 0.92 ms, 32×32 (default) ≈ 0.94 ms,
+  64×64 ≈ 1.45 ms. Finer grids cost more because each cell's accumulators are flushed to
+  memory once per row, so the flush traffic grows with the cell count while the pixel work
+  stays fixed. `grid_exp=7` (128×128) now *works* — the int16 cell limit that used to
+  forbid it was a `tensorstats` artifact — but at `thumb=256` its cells are 2 px wide, so
+  it is both expensive and statistically thin. 32×32 remains the sweet spot.
 
-The heavy pixel work (moments, structure tensor) is native; the rest is small-array numpy.
+The heavy pixel work (moments, structure tensor, HOG, extrema -- for all three
+channels, in one pass) is native; the rest is small-array numpy.
 Buffers are preallocated and reused, work is float32, the rolling baseline uses a sort
 instead of `np.median`, derived maps are cached, and all array outputs are lazy.
 

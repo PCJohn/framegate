@@ -1,4 +1,4 @@
-"""Structure-tensor maps (from structstats): edge energy, coherence, cornerness,
+"""Structure-tensor maps (from imfeat): edge energy, coherence, cornerness,
 orientation, and the global sharpness scalar. These are complementary to the
 moment-based maps -- they read gradient layout, not the intensity distribution.
 """

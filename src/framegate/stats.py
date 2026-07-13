@@ -164,7 +164,7 @@ class FrameStats:
             np.float32,
         )
 
-    # --- structure maps (gradient structure-tensor, from structstats) ---
+    # --- structure maps (gradient structure-tensor, from imfeat) ---
     # Complementary to the moment grids: these see edge/gradient layout the
     # intensity moments are blind to. All on the finest grid, so (G, G).
     @property
@@ -248,7 +248,7 @@ class FrameGate:
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
         # One extractor, one pass: moments AND structure, for every channel, on the
-        # same cells (imfeat merges the old tensorstats + structstats passes).
+        # same cells. imfeat computes every feature group for every channel, always.
         self._feat = imfeat.FeatureComputer(
             shape=(t, t, 3),
             grid=[(e, e) for e in self.cfg.pyramid_exps],

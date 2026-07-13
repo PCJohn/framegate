@@ -95,7 +95,7 @@ def _header(title):
 
 
 def _cfg_items(specs, frames):
-    """Build (label, image-fn, frames) items, skipping configs tensorstats rejects."""
+    """Build (label, image-fn, frames) items."""
     items = []
     for label, cfg in specs:
         try:
@@ -168,7 +168,6 @@ def run_synthetic():
     _header(
         "[3] grid-size sweep (1080p, default stride 2)  -- grid = 2**grid_exp cells/dim"
     )
-    # grid_exp 7 (128x128) exceeds tensorstats' int16 cell limit
     res = _bench_group(
         _cfg_items(
             [
@@ -181,7 +180,7 @@ def run_synthetic():
     for label in res:
         _print(label, res[label])
 
-    _header("[4] stride sweep (1080p, grid 32)  -- tensorstats subsampling")
+    _header("[4] stride sweep (1080p, grid 32)  -- imfeat pixel subsampling")
     res = _bench_group(
         _cfg_items(
             [(f"stride={st}", GateConfig(stride=st)) for st in (1, 2, 3, 4)], frames

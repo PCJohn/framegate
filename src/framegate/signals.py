@@ -9,12 +9,12 @@ import cv2
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
-# tensorstats layout: result["0,1"] is (3, 4) per-channel moments; result["grid_0"]
+# imfeat layout: result["mom_global"] is (3, 4) per-channel moments; result["mom_0"]
 # is (G, G, C, 4) = [row, col, channel, moment].
 CH_H, CH_S, CH_V = 0, 1, 2
 M_MEAN, M_VAR, M_M3, M_M4 = 0, 1, 2, 3
 
-# structstats.features() channel layout (ss.FEATURES order).
+# imfeat structure-tensor channel layout (imfeat.FEATURES order).
 SE_ENERGY, SE_COH, SE_OC, SE_OS, SE_CORN = 0, 1, 2, 3, 4
 
 # Orientation-vector change (illumination-invariant) at which a cell's motion is treated
@@ -69,7 +69,7 @@ def saliency_map(grid_V, grid_S, struct, surround_k: int) -> np.ndarray:
     luma center-surround contrast, cornerness (interest points), and orientation contrast
     -- a cell whose dominant edge orientation differs from its surround pops out (center-
     surround on the coherence-weighted double-angle vector), the classic orientation
-    pop-out that intensity/colour channels are blind to. `struct` is the finest structstats
+    pop-out that intensity/colour channels are blind to. `struct` is the finest imfeat structure
     grid (G,G,5). Center-surround uses a `surround_k` box (a cell vs its neighborhood).
     """
     vmean = grid_V[:, :, M_MEAN].astype(np.float32)

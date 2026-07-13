@@ -15,10 +15,8 @@ dependencies = [
     "numpy>=1.22",
     "opencv-python>=4.5",
     "pyyaml>=5.4",
-    # tensorstats (moments) and structstats (gradient structure) are prerequisites.
-    # Neither is on PyPI; install them first, e.g.:
-    #   pip install git+https://github.com/PCJohn/tensorstats
-    #   pip install git+https://github.com/PCJohn/structstats
+    # imfeat (moments + gradient structure, one pass) is a prerequisite. Not on PyPI:
+    #   pip install git+https://github.com/PCJohn/imfeat
 ]
 
 [project.optional-dependencies]
