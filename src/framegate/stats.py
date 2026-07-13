@@ -8,9 +8,8 @@ from functools import cached_property
 from typing import Optional
 
 import cv2
+import imfeat
 import numpy as np
-import structstats as ss
-import tensorstats as ts
 
 from . import signals as S
 from .config import GateConfig
@@ -43,7 +42,7 @@ class FrameStats:
         None  # (G,G) ||d(edge orientation vector)|| vs prev; illumination-invariant
     )
     struct: Optional[dict] = (
-        None  # structstats.features(V): per-level (cells,cells,5) + "global" (5,)
+        None  # imfeat structure maps for V: "grid_0" (cells,cells,5) + "global" (5,)
     )
 
     # --- per-channel grids (views; raw moments) ---
@@ -240,7 +239,7 @@ class FrameStats:
 
 
 class FrameGate:
-    """Per-frame extractor. Owns reusable buffers and one StatsComputer; no
+    """Per-frame extractor. Owns reusable buffers and one FeatureComputer; no
     temporal state, so it works identically on a still image or a video frame.
     Accepts BGR (H,W,3) or grayscale (H,W)/(H,W,1) uint8 input. Not thread-safe
     (the scratch buffers are reused per call); use one FrameGate per stream."""
@@ -248,15 +247,11 @@ class FrameGate:
     def __init__(self, cfg: Optional[GateConfig] = None):
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
-        self._stats = ts.StatsComputer(
+        # One extractor, one pass: moments AND structure, for every channel, on the
+        # same cells (imfeat merges the old tensorstats + structstats passes).
+        self._feat = imfeat.FeatureComputer(
             shape=(t, t, 3),
-            axes=[(0, 1)],
-            stride=(self.cfg.stride, self.cfg.stride, 1),
-            grid=[(e, e, 2) for e in self.cfg.pyramid_exps],
-        )
-        self._struct = ss.StructComputer(
-            shape=(t, t),
-            grid=[(e, e) for e in self.cfg.pyramid_exps],  # cells align 1:1 with _stats
+            grid=[(e, e) for e in self.cfg.pyramid_exps],
             stride=self.cfg.stride,
         )
         self._bgr = np.empty(
@@ -291,17 +286,21 @@ class FrameGate:
         h, w = frame.shape[:2]
         keep = self.cfg.return_frames
         hsv, thumb = self._to_hsv(frame, keep)
-        r = self._stats.compute(hsv)
-        chan = r["0,1"].astype(np.float32)
+        r = self._feat.features(hsv)
+        chan = r["mom_global"].astype(np.float32)
         grids = tuple(
-            r[f"grid_{i}"].astype(np.float32) for i in range(self.cfg.n_levels)
+            r[f"mom_{i}"].astype(np.float32) for i in range(self.cfg.n_levels)
         )
         grid = grids[
             0
         ]  # finest = output-map resolution; coarser levels feed multi-scale signals
 
-        # Structure-tensor features over the same V plane, same cells (zero-copy view).
-        struct = self._struct.features(hsv[:, :, S.CH_V])
+        # Structure-tensor features, from the same pass and the same cells. imfeat
+        # computes them for H, S and V; the signals below read V.
+        struct = {
+            "grid_0": r["struct_0"][:, :, S.CH_V, :],
+            "global": r["struct_global"][S.CH_V],
+        }
 
         # Blank = nothing to track: flat everywhere (no cell-level intensity spread) OR
         # negligible gradient anywhere (no edge/texture energy). The energy term reuses
