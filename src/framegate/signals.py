@@ -17,6 +17,11 @@ M_MEAN, M_VAR, M_M3, M_M4 = 0, 1, 2, 3
 # imfeat structure-tensor channel layout (imfeat.FEATURES order).
 SE_ENERGY, SE_COH, SE_OC, SE_OS, SE_CORN = 0, 1, 2, 3, 4
 
+# imfeat cross-cell summary layout: last axis of every "*_summary_i" map, in
+# imfeat.SUMMARY_STATS order. Each summary is (n_feat, C, 4); e.g. the peak V
+# cell-variance is mom_summary_0[M_VAR, CH_V, ST_MAX].
+ST_MIN, ST_MAX, ST_MEAN, ST_STD = 0, 1, 2, 3
+
 # Orientation-vector change (illumination-invariant) at which a cell's motion is treated
 # as fully structure-corroborated; clear object motion produces ~0.3-0.4, lighting ~0.
 MOTION_ORI_REF = 0.2

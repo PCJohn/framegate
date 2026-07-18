@@ -303,11 +303,13 @@ class FrameGate:
         }
 
         # Blank = nothing to track: flat everywhere (no cell-level intensity spread) OR
-        # negligible gradient anywhere (no edge/texture energy). The energy term reuses
-        # the structure pass above -- no separate corner detector or resize.
+        # negligible gradient anywhere (no edge/texture energy). Both peaks come from
+        # imfeat's per-level cross-cell summaries (free, same pass) -- no numpy reduction
+        # here, so the cost is O(1) in grid size.
         blank = (
-            float(grid[:, :, S.CH_V, S.M_VAR].max()) < self.cfg.solid_thresh
-            or float(struct["grid_0"][:, :, S.SE_ENERGY].max()) < self.cfg.edge_thresh
+            float(r["mom_summary_0"][S.M_VAR, S.CH_V, S.ST_MAX]) < self.cfg.solid_thresh
+            or float(r["struct_summary_0"][S.SE_ENERGY, S.CH_V, S.ST_MAX])
+            < self.cfg.edge_thresh
         )
 
         return FrameStats(

@@ -53,6 +53,15 @@ The design has exactly two layers, split along the only axis that matters —
 `gate.frame()` runs both. A single image simply never touches the temporal layer —
 that's the "use whichever parts apply" behaviour, for free.
 
+For streaming, **`Publisher`** wraps `Gate` as a pub/sub-style node: feed it frames and
+it emits a `Packet` — the frame plus its `FrameStats` (pyramid + maps), `TemporalSignals`,
+and inferred stream metadata (`frame_id` over all inputs, `shot_id` that increments on each
+cut) — but **only** for frames worth downstream work. Blank frames and freezes (a byte- or
+near-identical duplicate surfaces as `freeze`) are dropped, so a subscriber can assume every
+`Packet` is worth the heavy pipeline. Read the return of `publish(frame)` (`None` when
+dropped) or register a callback via `subscribe`; the emit path is a plain fan-out, so a real
+transport (zmq, asyncio queue, ROS) can replace it later without touching the gate.
+
 Signals are **lazy properties**: you pay only for the ones you read. Reading
 `stats.exposure` costs nothing extra; the saliency/text/motion arrays are computed
 only on access.
@@ -422,16 +431,19 @@ framegate/
 │   ├── signals.py         # pure numeric core (no state, easy to test/port)
 │   ├── stats.py           # FrameGate + FrameStats (per-frame extraction)
 │   ├── stream.py          # StreamAnalyzer + TemporalSignals (temporal layer)
-│   └── gate.py            # Gate facade + lossless duplicate skip
+│   ├── gate.py            # Gate facade + lossless duplicate skip
+│   └── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
 ├── examples/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals)
-│   └── benchmark.py       # latency measurement
+│   ├── benchmark.py       # latency measurement
+│   └── publish.py         # Publisher demo: drops blank/frozen frames, prints shot_id
 └── tests/
     ├── synth.py           # synthetic scene + pattern builders
     ├── test_accuracy.py   # feature functionality: cuts, blank, freeze, fade, flicker, dedup
     ├── test_robustness.py # degenerate inputs, value ranges, invariances, config sweeps
     ├── test_config.py     # YAML template parity, overrides, immutability
-    └── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
+    ├── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
+    └── test_publish.py    # Publisher drop policy + frame_id / shot_id metadata
 ```
 
 All visualization and timing code lives in `examples/` — the library itself contains
@@ -442,6 +454,7 @@ no matplotlib or benchmarking code.
 ```bash
 python examples/visualize.py path/to/video.mp4     # needs [viz]
 python examples/benchmark.py                        # synthetic, or pass a video path
+python examples/publish.py                          # publishing gate (synthetic, or pass a video)
 pytest                                              # needs [dev]; -s prints latencies
 ```
 
