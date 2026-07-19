@@ -58,3 +58,37 @@ def test_subscribers_receive_published_packets():
     published = [p for p in map(pub.publish, frames) if p is not None]
     assert got == published  # callback sees exactly what publish() returned
     assert len(got) == 3  # the leading blank was dropped
+
+
+def _shot(hue, seed, n=12):
+    return [synth.noisy(synth.hsv_scene(hue, seed)) for _ in range(n)]
+
+
+def _per_shot_groups(seq):
+    """Drive a Publisher over `seq`; return the group id of each distinct shot_id."""
+    pub = Publisher()
+    seen = {}
+    for f in seq:
+        p = pub.publish(f)
+        if p is not None:
+            seen.setdefault(p.shot_id, p.shot_group_id)
+    return [seen[k] for k in sorted(seen)]
+
+
+def test_packet_carries_shot_group_id():
+    pub = Publisher()
+    pkt = pub.publish(synth.noisy(synth.hsv_scene(60, 2)))
+    assert pkt.shot_group_id == 0  # first shot opens the first group
+
+
+def test_cross_cut_reidentifies_recurring_shots():
+    a, b = _shot(60, 2), _shot(120, 3)
+    assert _per_shot_groups(a + b + a + b) == [0, 1, 0, 1]  # ABAB -> 2 groups
+    c = _shot(30, 7)
+    assert _per_shot_groups(a + b + c + a + b + c) == [0, 1, 2, 0, 1, 2]  # ABCABC
+
+
+def test_distinct_shots_do_not_merge():
+    seq = sum((_shot(h, s) for h, s in [(60, 2), (120, 3), (30, 7), (90, 5)]), [])
+    groups = _per_shot_groups(seq)
+    assert groups == [0, 1, 2, 3]  # four different shots -> four different groups

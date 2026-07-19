@@ -56,11 +56,21 @@ that's the "use whichever parts apply" behaviour, for free.
 For streaming, **`Publisher`** wraps `Gate` as a pub/sub-style node: feed it frames and
 it emits a `Packet` — the frame plus its `FrameStats` (pyramid + maps), `TemporalSignals`,
 and inferred stream metadata (`frame_id` over all inputs, `shot_id` that increments on each
-cut) — but **only** for frames worth downstream work. Blank frames and freezes (a byte- or
-near-identical duplicate surfaces as `freeze`) are dropped, so a subscriber can assume every
-`Packet` is worth the heavy pipeline. Read the return of `publish(frame)` (`None` when
-dropped) or register a callback via `subscribe`; the emit path is a plain fan-out, so a real
+cut, and `shot_group_id` shared by recurrences of the same shot — so a dialogue that
+cross-cuts between three setups emits `shot_id` 0,1,2,3,4,5… with `shot_group_id`
+0,1,2,0,1,2…) — but **only** for frames worth downstream work. Blank frames and freezes (a
+byte- or near-identical duplicate surfaces as `freeze`) are dropped, so a subscriber can
+assume every `Packet` is worth the heavy pipeline. Read the return of `publish(frame)`
+(`None` when dropped) or register a callback via `subscribe`; the emit path is a plain
+fan-out, so a real
 transport (zmq, asyncio queue, ROS) can replace it later without touching the gate.
+
+**Shot re-identification** (`shotmem.py`) is what gives `shot_group_id` its meaning. At
+each cut the new shot's first frame is matched against remembered shots using the *same*
+NCC + median/MAD kernel as cut detection (`StreamAnalyzer.shot_z`, reusing the cut machinery
+with a looser threshold, `reid_z`), so recurring shots collapse onto one group id at near-zero
+extra cost. Retrieval is an O(K) scan today, isolated behind `ShotMemory`'s index so it can be
+swapped for an LSH/ANN index later without touching the match logic.
 
 Signals are **lazy properties**: you pay only for the ones you read. Reading
 `stats.exposure` costs nothing extra; the saliency/text/motion arrays are computed
@@ -432,18 +442,20 @@ framegate/
 │   ├── stats.py           # FrameGate + FrameStats (per-frame extraction)
 │   ├── stream.py          # StreamAnalyzer + TemporalSignals (temporal layer)
 │   ├── gate.py            # Gate facade + lossless duplicate skip
-│   └── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
+│   ├── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
+│   └── shotmem.py         # ShotMemory: shot re-identification (shot_group_id)
 ├── examples/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals)
 │   ├── benchmark.py       # latency measurement
-│   └── publish.py         # Publisher demo: drops blank/frozen frames, prints shot_id
+│   └── publish.py         # Publisher demo: drops frames, prints shot_id + shot_group_id
 └── tests/
     ├── synth.py           # synthetic scene + pattern builders
     ├── test_accuracy.py   # feature functionality: cuts, blank, freeze, fade, flicker, dedup
     ├── test_robustness.py # degenerate inputs, value ranges, invariances, config sweeps
     ├── test_config.py     # YAML template parity, overrides, immutability
     ├── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
-    └── test_publish.py    # Publisher drop policy + frame_id / shot_id metadata
+    ├── test_publish.py    # Publisher drop policy + frame_id / shot_id / shot_group_id
+    └── test_shotmem.py    # ShotMemory id assignment, threshold, drift, retrieval seam
 ```
 
 All visualization and timing code lives in `examples/` — the library itself contains

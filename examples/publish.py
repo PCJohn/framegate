@@ -29,27 +29,30 @@ def video_frames(src):
 
 
 def synthetic_frames():
-    """Shot A then shot B back-to-back (a direct cut -> shot_id bumps), with a held
-    frame inside A and a blank gap after B -- so the run shows a cut plus the freeze
-    and blank drop paths. (A cut is not detected *across* a blank, which resets the
-    stream, so the cut is placed at the direct A->B boundary.)"""
+    """Cross-cut A, B, A back-to-back (two direct cuts -> shot_id 0,1,2), where the
+    two A shots share a layout so the third shot re-identifies as A's group
+    (shot_group_id 0,1,0). A held frame inside the first A and a trailing blank gap
+    exercise the freeze and blank drop paths too."""
     rng = np.random.default_rng(0)
+    base_a = (rng.random((128, 128)) * 120 + 80).astype(np.uint8)  # A's fixed layout
+    base_b = (rng.random((128, 128)) * 120 + 80).astype(np.uint8)  # B's fixed layout
 
-    def shot(hue, n):
-        base = (rng.random((128, 128)) * 120 + 80).astype(np.uint8)  # fixed luma layout
+    def shot(base, hue, n):
         out = []
         for _ in range(n):
-            noise = rng.integers(-3, 4, base.shape)
-            luma = np.clip(base + noise, 0, 255).astype(np.uint8)
+            luma = np.clip(base + rng.integers(-3, 4, base.shape), 0, 255).astype(
+                np.uint8
+            )
             hsv = cv2.merge([np.full_like(luma, hue), np.full_like(luma, 200), luma])
             out.append(cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR))
         return out
 
-    a = shot(60, 12)
-    a.insert(6, a[5])  # a held (byte-identical) frame -> freeze/duplicate drop
-    b = shot(120, 10)  # different luma + hue, back-to-back -> a cut at the A/B boundary
+    a1 = shot(base_a, 60, 12)
+    a1.insert(6, a1[5])  # a held (byte-identical) frame -> freeze/duplicate drop
+    b = shot(base_b, 120, 10)  # different layout + hue -> a cut at each boundary
+    a2 = shot(base_a, 60, 10)  # A returns -> should re-identify as group 0
     gap = [np.zeros((128, 128, 3), np.uint8)] * 3  # blank drop
-    return a + b + gap
+    return a1 + b + a2 + gap
 
 
 def main(frames):
@@ -57,6 +60,7 @@ def main(frames):
     pub.subscribe(
         lambda p: print(
             f"  publish  frame_id={p.frame_id:4d}  shot_id={p.shot_id}"
+            f"  shot_group_id={p.shot_group_id}"
             f"{'   <cut>' if p.signals.cut else ''}"
         )
     )

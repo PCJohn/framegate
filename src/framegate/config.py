@@ -44,6 +44,7 @@ class GateConfig:
     robust_min: int = 8  # samples before the rolling score is trusted
     robust_k: float = 8.0  # outlier if value > median + k * 1.4826 * MAD
     cut_dissim: float = 0.45  # static-scene guard floor on the cut score
+    reid_z: float = 6.0  # shot re-ID: match a stored shot group if MAD-z <= this
     min_scene_len: int = 6  # min frames between cuts (debounce)
     freeze_eps: float = 0.20  # residual-RMS + |dV| below this -> frozen frame
 

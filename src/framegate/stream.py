@@ -51,15 +51,21 @@ class _RollingRobust:
         n = a.size
         return 0.5 * (a[(n - 1) // 2] + a[n // 2])
 
-    def score(self, x: float) -> float:
+    def z(self, x: float) -> float:
+        """Robust z-score of x against the trailing window, WITHOUT recording it.
+        0.0 until the window has min_samples (baseline not yet trusted)."""
         if len(self._buf) < self._min:
-            s = 0.0
-        else:
-            a = np.fromiter(self._buf, np.float32)
-            med = self._median_sorted(a)
-            s = (x - med) / (1.4826 * self._median_sorted(np.abs(a - med)) + self._eps)
+            return 0.0
+        a = np.fromiter(self._buf, np.float32)
+        med = self._median_sorted(a)
+        return float(
+            (x - med) / (1.4826 * self._median_sorted(np.abs(a - med)) + self._eps)
+        )
+
+    def score(self, x: float) -> float:
+        s = self.z(x)
         self._buf.append(x)
-        return float(s)
+        return s
 
 
 class StreamAnalyzer:
@@ -131,6 +137,16 @@ class StreamAnalyzer:
         luma_corr = self._luma_corr(prev_luma, cur_luma)
         color = float(np.linalg.norm(prev_color - cur_color)) / (255.0 * c.color_maxd)
         return max(1.0 - luma_corr, color), luma_corr
+
+    def shot_z(self, luma_a, color_a, luma_b, color_b) -> float:
+        """Re-ID dissimilarity between two frame descriptors on the cut-score scale:
+        the same max(1 - NCC, colour-shift) as a cut, robust-normalized by the current
+        within-shot median+MAD baseline (non-mutating -- this comparison is not a
+        consecutive-frame transition, so it must not enter the cut baseline). Returns
+        +inf past the absolute cut floor, which also keeps a cold/tiny baseline (z=0)
+        from forcing a spurious match on clearly-different shots."""
+        d, _ = self._cut_score(luma_a, color_a, luma_b, color_b)
+        return float("inf") if d > self.cfg.cut_dissim else self._roll.z(d)
 
     def update(self, fs) -> TemporalSignals:
         c = self.cfg

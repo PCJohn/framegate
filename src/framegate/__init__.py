@@ -11,8 +11,9 @@ Quick start:
     stats = gate.image(img)                       # single image
     stats, signals = gate.frame(frame)            # video frame
 
-Or drive it as a publishing node that drops blank/frozen/duplicate frames and
-emits a Packet (frame + stats + signals + shot_id) only when work is worth doing:
+Or drive it as a publishing node that drops blank/frozen/duplicate frames and emits
+a Packet (frame + stats + signals + shot_id + shot_group_id) only when work is worth
+doing; shot_group_id is shared by recurrences of the same shot (re-identification):
 
     from framegate import Publisher
     pub = Publisher()
@@ -25,6 +26,7 @@ emits a Packet (frame + stats + signals + shot_id) only when work is worth doing
 from .config import GateConfig
 from .gate import Gate
 from .publish import Packet, Publisher
+from .shotmem import ShotMemory
 from .stats import FrameGate, FrameStats
 from .stream import StreamAnalyzer, TemporalSignals
 
@@ -37,5 +39,6 @@ __all__ = [
     "TemporalSignals",
     "Publisher",
     "Packet",
+    "ShotMemory",
 ]
 __version__ = "0.1.0"

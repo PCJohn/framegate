@@ -6,9 +6,12 @@ near-identical duplicate surfaces as `freeze`, so it is dropped too). A subscrib
 can therefore assume every Packet it receives is worth the heavy pipeline.
 
 Each Packet carries the frame, its FrameStats (the feature pyramid + all per-frame
-maps), the TemporalSignals, and inferred stream metadata (frame_id, shot_id). The
-emit path is a plain callback fan-out, so a real transport (zmq, asyncio queue,
-ROS, ...) can replace `_emit` later without touching the gate or the drop policy.
+maps), the TemporalSignals, and inferred stream metadata: frame_id, shot_id, and
+shot_group_id. shot_id counts shots; shot_group_id is shared by every recurrence of
+the same shot (see shotmem.py), so a dialogue that cross-cuts between the same three
+setups emits shot_ids 0,1,2,3,4,5,... with shot_group_ids 0,1,2,0,1,2,... The emit
+path is a plain callback fan-out, so a real transport (zmq, asyncio queue, ROS, ...)
+can replace `_emit` later without touching the gate or the drop policy.
 
     pub = Publisher()
     pub.subscribe(handle)                 # optional push interface
@@ -25,6 +28,7 @@ import numpy as np
 
 from .config import GateConfig
 from .gate import Gate
+from .shotmem import ShotMemory, ShotRef
 from .stats import FrameStats
 from .stream import TemporalSignals
 
@@ -36,6 +40,7 @@ class Packet:
 
     frame_id: int  # index over ALL input frames incl. dropped, so gaps stay visible
     shot_id: int  # increments on each detected cut (first frame of the new shot)
+    shot_group_id: int  # shared by recurrences of the same shot (re-identification)
     frame: np.ndarray
     stats: FrameStats
     signals: TemporalSignals
@@ -52,6 +57,14 @@ class Publisher:
         self._subs: List[Callable[[Packet], None]] = []
         self._frame_id = -1
         self._shot_id = 0
+        self._mem = ShotMemory(self.cfg.reid_z)
+        self._group = -1  # current shot's group id (-1 until the first shot opens)
+        # cut is confirmed one frame late, so at a cut `_last` is the NEW shot's first
+        # frame and `_prev` is the OLD shot's last frame.
+        self._last: Optional[ShotRef] = None  # previous published frame (t-1)
+        self._prev: Optional[ShotRef] = None  # published frame before that (t-2)
+        # re-ID kernel: reuse the cut detector's NCC + MAD-z between two descriptors
+        self._score = lambda q, r: self._gate.shot_z(q.luma, q.color, r.luma, r.color)
 
     def subscribe(self, fn: Callable[[Packet], None]) -> None:
         """Register a callback invoked with each published Packet."""
@@ -68,8 +81,22 @@ class Publisher:
         stats, signals = self._gate.frame(frame)
         if stats.blank or signals.freeze:
             return None
-        if signals.cut:
+        desc = ShotRef(stats.v_cell_mean, stats.color_mean)
+        if self._group < 0:  # first shot opens as group 0
+            self._group, _ = self._mem.match(desc, self._score)
+        elif (
+            signals.cut
+        ):  # cut (confirmed 1 frame late) closes this shot, opens the next
             self._shot_id += 1
-        pkt = Packet(self._frame_id, self._shot_id, frame, stats, signals)
+            if self._prev is not None:
+                self._mem.refresh(
+                    self._group, self._prev
+                )  # old shot's last clean frame
+            first = (
+                self._last if self._last is not None else desc
+            )  # new shot's 1st frame
+            self._group, _ = self._mem.match(first, self._score)
+        self._prev, self._last = self._last, desc
+        pkt = Packet(self._frame_id, self._shot_id, self._group, frame, stats, signals)
         self._emit(pkt)
         return pkt
