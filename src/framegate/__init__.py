@@ -26,7 +26,7 @@ doing; shot_group_id is shared by recurrences of the same shot (re-identificatio
 from .config import GateConfig
 from .gate import Gate
 from .publish import Packet, Publisher
-from .shotmem import ShotMemory
+from .shotmem import ShotMemory, ShotTracker
 from .stats import FrameGate, FrameStats
 from .stream import StreamAnalyzer, TemporalSignals
 
@@ -40,5 +40,6 @@ __all__ = [
     "Publisher",
     "Packet",
     "ShotMemory",
+    "ShotTracker",
 ]
 __version__ = "0.1.0"

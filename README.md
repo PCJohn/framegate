@@ -443,9 +443,10 @@ framegate/
 │   ├── stream.py          # StreamAnalyzer + TemporalSignals (temporal layer)
 │   ├── gate.py            # Gate facade + lossless duplicate skip
 │   ├── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
-│   └── shotmem.py         # ShotMemory: shot re-identification (shot_group_id)
+│   └── shotmem.py         # ShotMemory + ShotTracker: shot re-identification (shot_group_id)
 ├── examples/
-│   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals)
+│   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
+│   ├── shots.py           # batch shot analyzer: filmstrip + re-ID verification (matplotlib)
 │   ├── benchmark.py       # latency measurement
 │   └── publish.py         # Publisher demo: drops frames, prints shot_id + shot_group_id
 └── tests/
@@ -467,6 +468,7 @@ no matplotlib or benchmarking code.
 python examples/visualize.py path/to/video.mp4     # needs [viz]
 python examples/benchmark.py                        # synthetic, or pass a video path
 python examples/publish.py                          # publishing gate (synthetic, or pass a video)
+python examples/shots.py                            # shot filmstrip + re-ID check (synthetic, or a video)
 pytest                                              # needs [dev]; -s prints latencies
 ```
 

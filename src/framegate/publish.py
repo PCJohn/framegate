@@ -28,7 +28,7 @@ import numpy as np
 
 from .config import GateConfig
 from .gate import Gate
-from .shotmem import ShotMemory, ShotRef
+from .shotmem import ShotTracker
 from .stats import FrameStats
 from .stream import TemporalSignals
 
@@ -56,15 +56,7 @@ class Publisher:
         self._gate = Gate(self.cfg)
         self._subs: List[Callable[[Packet], None]] = []
         self._frame_id = -1
-        self._shot_id = 0
-        self._mem = ShotMemory(self.cfg.reid_z)
-        self._group = -1  # current shot's group id (-1 until the first shot opens)
-        # cut is confirmed one frame late, so at a cut `_last` is the NEW shot's first
-        # frame and `_prev` is the OLD shot's last frame.
-        self._last: Optional[ShotRef] = None  # previous published frame (t-1)
-        self._prev: Optional[ShotRef] = None  # published frame before that (t-2)
-        # re-ID kernel: reuse the cut detector's NCC + MAD-z between two descriptors
-        self._score = lambda q, r: self._gate.shot_z(q.luma, q.color, r.luma, r.color)
+        self._shots = ShotTracker(self._gate.shot_z, self.cfg.reid_z)
 
     def subscribe(self, fn: Callable[[Packet], None]) -> None:
         """Register a callback invoked with each published Packet."""
@@ -81,22 +73,7 @@ class Publisher:
         stats, signals = self._gate.frame(frame)
         if stats.blank or signals.freeze:
             return None
-        desc = ShotRef(stats.v_cell_mean, stats.color_mean)
-        if self._group < 0:  # first shot opens as group 0
-            self._group, _ = self._mem.match(desc, self._score)
-        elif (
-            signals.cut
-        ):  # cut (confirmed 1 frame late) closes this shot, opens the next
-            self._shot_id += 1
-            if self._prev is not None:
-                self._mem.refresh(
-                    self._group, self._prev
-                )  # old shot's last clean frame
-            first = (
-                self._last if self._last is not None else desc
-            )  # new shot's 1st frame
-            self._group, _ = self._mem.match(first, self._score)
-        self._prev, self._last = self._last, desc
-        pkt = Packet(self._frame_id, self._shot_id, self._group, frame, stats, signals)
+        shot_id, group_id = self._shots.update(stats, signals)
+        pkt = Packet(self._frame_id, shot_id, group_id, frame, stats, signals)
         self._emit(pkt)
         return pkt

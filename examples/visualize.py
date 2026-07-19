@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
-from framegate import Gate
+from framegate import Gate, ShotTracker
 
 HISTORY = 300  # rolling time-series window (viz only)
 DRAW_EVERY = 3  # redraw the dashboard every N frames; compute still runs every frame
@@ -67,6 +67,7 @@ def run(src):
 
     gate = Gate()
     g = gate.cfg.grid_size
+    tracker = ShotTracker(gate.shot_z, gate.cfg.reid_z)  # shot_id + shot_group_id
 
     fig = plt.figure(figsize=(17, 9))
     gs = fig.add_gridspec(
@@ -170,6 +171,7 @@ def run(src):
     plt.ion()
     plt.show()
     fidx = 0
+    sid, gid = 0, 0  # last-known shot id / group id (persist through drops)
     last_render = 0.0
     gc.disable()  # GC pauses are the main per-frame latency spike; reap manually below
     try:
@@ -205,6 +207,9 @@ def run(src):
             )
             t2 = time.perf_counter()
             t_core, t_maps = (t1 - t0) * 1e3, (t2 - t1) * 1e3
+
+            if not (fs.blank or sig.freeze):  # blank/frozen frames are not shots
+                sid, gid = tracker.update(fs, sig)
 
             if sig.cut:
                 cut_frames.append(fidx - 1)
@@ -277,6 +282,7 @@ def run(src):
             )
             txt.set_text(
                 f"state      {state}\n"
+                f"shot       s{sid:<4d} group g{gid}\n"
                 f"compute    {a_full:5.2f} ms   ({1000 / max(a_full, 1e-6):4.0f} fps)\n"
                 f"  core     {a_core:5.2f} ms   + maps {a_full - a_core:4.2f}\n"
                 f"  render   {last_render:5.2f} ms   (matplotlib, 1/{DRAW_EVERY} frames)\n"
@@ -289,7 +295,11 @@ def run(src):
                 f"flat_frac  {fs.flat_fraction:5.2f}   oriented {fs.orientedness:.2f}"
             )
 
-            fig.suptitle(f"framegate   |   frame {fidx}   |   {src}", fontsize=11)
+            fig.suptitle(
+                f"framegate   |   frame {fidx}   |   shot {sid} \u00b7 group {gid}"
+                f"   |   {src}",
+                fontsize=11,
+            )
             tr = time.perf_counter()
             fig.canvas.draw_idle()
             fig.canvas.flush_events()
