@@ -33,6 +33,8 @@ from framegate.shotmem import ShotRef
 THUMB_W = 160  # thumbnail width for display (px)
 MAX_SHOTS = 48  # cap the filmstrip so a long clip stays readable
 MAX_HITS = 8  # cap the verification panel
+REP_OFFSET = 4  # representative = this many frames into the shot (skip the transition)
+PROGRESS_EVERY = 100  # frames between progress prints (batch runs on long clips)
 
 
 def _thumb(frame):
@@ -44,41 +46,55 @@ def _desc(fs):
     return ShotRef(fs.v_cell_mean.copy(), fs.color_mean.copy())
 
 
-def analyze(frames, cfg=None):
+def analyze(frames, cfg=None, progress=True):
     """Run the gate + shot tracker over `frames` (an iterable of BGR arrays). Returns
-    (gate, shots) where each shot is a dict with its id, group, frame range, first/
-    last/representative thumbnails, and first/last descriptors (for re-ID scoring)."""
+    (gate, shots) where each shot is a dict with its id, group, frame range, first and
+    representative thumbnails, and first descriptor (for re-ID scoring). Processes the
+    whole clip up front (it is a batch tool), printing progress to stderr; only two
+    thumbnails are kept per shot, so memory stays flat on long videos."""
     gate = Gate(cfg)
     tracker = ShotTracker(gate.shot_z, gate.cfg.reid_z)
     shots, cur = [], None
-
-    def close(s):
-        s["rep"] = s["thumbs"][len(s["thumbs"]) // 2]  # middle frame = representative
-        del s["thumbs"]
-        shots.append(s)
-
+    fidx = -1
     for fidx, frame in enumerate(frames):
+        if progress and fidx % PROGRESS_EVERY == 0:
+            print(
+                f"\r  analyzing... frame {fidx}, {len(shots)} shots",
+                end="",
+                file=sys.stderr,
+                flush=True,
+            )
         fs, sig = gate.frame(frame)
         if fs.blank or sig.freeze:  # not a shot -> skip (as Publisher would drop it)
             continue
         sid, gid = tracker.update(fs, sig)
         if cur is None or sid != cur["sid"]:
             if cur is not None:
-                close(cur)
-            th = _thumb(frame)
+                shots.append(cur)
+            th = _thumb(frame)  # one resize per shot start, not per frame
             cur = dict(
                 sid=sid,
                 gid=gid,
                 first_id=fidx,
+                last_id=fidx,
+                n=1,
                 first=th,
+                rep=th,
                 first_desc=_desc(fs),
-                thumbs=[],
             )
-        cur["gid"] = gid  # stable within a shot; keep the latest
-        cur["thumbs"].append(_thumb(frame))
-        cur["last_id"] = fidx
+        else:
+            cur["gid"] = gid  # stable within a shot; keep the latest
+            cur["last_id"] = fidx
+            cur["n"] += 1
+            if cur["n"] == REP_OFFSET:  # a settled frame stands in for the shot
+                cur["rep"] = _thumb(frame)
     if cur is not None:
-        close(cur)
+        shots.append(cur)
+    if progress:
+        print(
+            f"\r  analyzed {fidx + 1} frames -> {len(shots)} shots" + " " * 12,
+            file=sys.stderr,
+        )
     return gate, shots
 
 

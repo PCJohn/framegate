@@ -143,10 +143,10 @@ class StreamAnalyzer:
         the same max(1 - NCC, colour-shift) as a cut, robust-normalized by the current
         within-shot median+MAD baseline (non-mutating -- this comparison is not a
         consecutive-frame transition, so it must not enter the cut baseline). Returns
-        +inf past the absolute cut floor, which also keeps a cold/tiny baseline (z=0)
-        from forcing a spurious match on clearly-different shots."""
+        +inf past the absolute re-ID ceiling (`reid_maxd`), which also keeps a cold/tiny
+        baseline (z=0) from forcing a spurious match on clearly-different shots."""
         d, _ = self._cut_score(luma_a, color_a, luma_b, color_b)
-        return float("inf") if d > self.cfg.cut_dissim else self._roll.z(d)
+        return float("inf") if d > self.cfg.reid_maxd else self._roll.z(d)
 
     def update(self, fs) -> TemporalSignals:
         c = self.cfg

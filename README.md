@@ -68,7 +68,8 @@ transport (zmq, asyncio queue, ROS) can replace it later without touching the ga
 **Shot re-identification** (`shotmem.py`) is what gives `shot_group_id` its meaning. At
 each cut the new shot's first frame is matched against remembered shots using the *same*
 NCC + median/MAD kernel as cut detection (`StreamAnalyzer.shot_z`, reusing the cut machinery
-with a looser threshold, `reid_z`), so recurring shots collapse onto one group id at near-zero
+with looser thresholds — an absolute ceiling `reid_maxd` (the main leniency dial) and a
+robust backstop `reid_z`), so recurring shots collapse onto one group id at near-zero
 extra cost. Retrieval is an O(K) scan today, isolated behind `ShotMemory`'s index so it can be
 swapped for an LSH/ANN index later without touching the match logic.
 

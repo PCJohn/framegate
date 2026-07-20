@@ -44,7 +44,11 @@ class GateConfig:
     robust_min: int = 8  # samples before the rolling score is trusted
     robust_k: float = 8.0  # outlier if value > median + k * 1.4826 * MAD
     cut_dissim: float = 0.45  # static-scene guard floor on the cut score
-    reid_z: float = 6.0  # shot re-ID: match a stored shot group if MAD-z <= this
+    reid_z: float = 15.0  # shot re-ID: match a stored shot group if MAD-z <= this
+    reid_maxd: float = 0.6  # shot re-ID: absolute cut-score ceiling for a match
+    # reid_maxd is the main leniency dial (raise to forgive bigger gaps); reid_z is a
+    # robust backstop that still rejects gross jumps when the within-shot baseline is
+    # tight (near-static content), decoupled from cut_dissim so cuts stay sensitive.
     min_scene_len: int = 6  # min frames between cuts (debounce)
     freeze_eps: float = 0.20  # residual-RMS + |dV| below this -> frozen frame
 
