@@ -86,6 +86,7 @@ class StreamAnalyzer:
             None  # prev per-cell orientation vec (G,G,2)
         )
         self._prev_V: Optional[float] = None
+        self._l1: deque = deque(maxlen=max(1, self.cfg.freeze_win))  # (luma, V) ring
         self._roll = _RollingRobust(self.cfg.roll_win, self.cfg.robust_min)
         self._vhist: deque = deque(maxlen=self.cfg.flicker_win)
         self._han = np.hanning(self.cfg.flicker_win).astype(
@@ -101,6 +102,7 @@ class StreamAnalyzer:
     def _reset(self):
         self._prev_luma = self._prev_color = self._prev_V = None
         self._prev_ovec = None
+        self._l1.clear()
         self._vhist.clear()
         self._s2 = self._s1 = 0.0
         self._o1 = False
@@ -116,6 +118,18 @@ class StreamAnalyzer:
         a = float((pc * cc).mean()) / vp
         b = float(cur.mean() - a * prev.mean())
         return a, b, cur - (a * prev + b)
+
+    def _frozen(self, luma, V) -> bool:
+        """L1: does this frame affine-match any frame in the ring? The affine fit
+        absorbs a global brightness/contrast change; |dV| catches an exposure shift
+        the fit's own recentring would otherwise hide. Cheap -- a handful of (G,G)
+        array ops per ring entry, and G is the thumbnail cell count."""
+        eps = self.cfg.freeze_eps
+        for pl, pv in self._l1:
+            _, _, resid = self._affine(pl, luma)
+            if float(np.sqrt((resid**2).mean())) + abs(V - pv) < eps:
+                return True
+        return False
 
     def _luma_corr(self, prev, cur):
         """Motion-compensated luma correlation. Skips the shift search on near-static
@@ -161,14 +175,13 @@ class StreamAnalyzer:
             self._reset()
             self._prev_luma, self._prev_color, self._prev_V = luma, color, V
             self._prev_ovec = ovec
+            self._l1.append((luma, V))
             self._vhist.append(V)
             self._idx_prev = self._idx
             return TemporalSignals.none()
 
         a, b, resid = self._affine(self._prev_luma, luma)  # 2-D, no ravel copies
-        resid_rms = float(np.sqrt((resid**2).mean()))
-        dV = V - self._prev_V
-        fs.residual = resid  # already (G,G); annotate the frame with its motion
+        fs.residual = resid  # already (G,G); annotate the frame with its motion vs t-1
         fs.ori_change = np.hypot(
             ovec[:, :, 0] - self._prev_ovec[:, :, 0],
             ovec[:, :, 1] - self._prev_ovec[:, :, 1],
@@ -184,7 +197,10 @@ class StreamAnalyzer:
         cut_frame = self._idx_prev if cut else -1
         self._s2, self._s1, self._o1 = self._s1, cut_score, outlier
 
-        freeze = (resid_rms + abs(dV) < c.freeze_eps) and not cut and self._cut_cd == 0
+        # L1: frozen if this frame affine-matches ANY recent kept frame, not just t-1
+        # (the ring's newest entry is t-1, so freeze_win=1 is the old behaviour). The
+        # motion annotation above stays strictly vs t-1; only the decision scans back.
+        freeze = self._frozen(luma, V) and not cut and self._cut_cd == 0
 
         self._vhist.append(V)
         hist = np.fromiter(self._vhist, np.float32)
@@ -199,6 +215,7 @@ class StreamAnalyzer:
 
         self._prev_luma, self._prev_color, self._prev_V = luma, color, V
         self._prev_ovec = ovec
+        self._l1.append((luma, V))
         self._idx_prev = self._idx
         self._cut_cd = 1 if cut else max(0, self._cut_cd - 1)
         self._lock = c.min_scene_len if cut else max(0, self._lock - 1)

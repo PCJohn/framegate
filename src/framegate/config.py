@@ -44,13 +44,21 @@ class GateConfig:
     robust_min: int = 8  # samples before the rolling score is trusted
     robust_k: float = 8.0  # outlier if value > median + k * 1.4826 * MAD
     cut_dissim: float = 0.45  # static-scene guard floor on the cut score
-    reid_z: float = 15.0  # shot re-ID: match a stored shot group if MAD-z <= this
-    reid_maxd: float = 0.6  # shot re-ID: absolute cut-score ceiling for a match
-    # reid_maxd is the main leniency dial (raise to forgive bigger gaps); reid_z is a
-    # robust backstop that still rejects gross jumps when the within-shot baseline is
-    # tight (near-static content), decoupled from cut_dissim so cuts stay sensitive.
+    # L2 shot re-ID (framestore + per-bit Bernoulli). A new shot's first-frame pHash
+    # queries the store for candidate groups within reid_maxd (relative Hamming, the
+    # recall net); each candidate is then scored by the mean per-bit log-likelihood
+    # that the frame was drawn from that shot's learned bit distribution, and the best
+    # is a re-ID iff its score >= reid_ll (the precision dial). Looser than the old NCC
+    # heuristic by design: bits that vary within a shot (a moving mouth) stop
+    # penalising the match, so the same setup re-IDs across pose/speech changes.
+    reid_maxd: float = 0.25  # candidate radius: relative Hamming in [0,1]
+    reid_ll: float = -0.28  # match if mean per-bit log-likelihood >= this
     min_scene_len: int = 6  # min frames between cuts (debounce)
-    freeze_eps: float = 0.20  # residual-RMS + |dV| below this -> frozen frame
+    # L1 memory: a frame is frozen if it affine-matches ANY of the last freeze_win kept
+    # frames (not just the previous one), so a flicker between two held frames still
+    # reads as frozen. freeze_win=1 is the strict previous-frame-only behaviour.
+    freeze_eps: float = 0.35  # residual-RMS + |dV| below this -> frozen frame
+    freeze_win: int = 3  # L1 ring: compare against this many recent kept frames
 
     # --- free temporal signals ---
     flicker_win: int = 32  # brightness-history length (also flicker FFT length)

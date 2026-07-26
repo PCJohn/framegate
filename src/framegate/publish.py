@@ -56,7 +56,7 @@ class Publisher:
         self._gate = Gate(self.cfg)
         self._subs: List[Callable[[Packet], None]] = []
         self._frame_id = -1
-        self._shots = ShotTracker(self._gate.shot_z, self.cfg.reid_z)
+        self._shots = ShotTracker(self.cfg)
 
     def subscribe(self, fn: Callable[[Packet], None]) -> None:
         """Register a callback invoked with each published Packet."""
@@ -73,7 +73,7 @@ class Publisher:
         stats, signals = self._gate.frame(frame)
         if stats.blank or signals.freeze:
             return None
-        shot_id, group_id = self._shots.update(stats, signals)
+        shot_id, group_id = self._shots.update(stats, signals, self._frame_id)
         pkt = Packet(self._frame_id, shot_id, group_id, frame, stats, signals)
         self._emit(pkt)
         return pkt

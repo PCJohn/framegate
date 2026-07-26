@@ -28,7 +28,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from framegate import Gate, ShotTracker
-from framegate.shotmem import ShotRef
 
 THUMB_W = 160  # thumbnail width for display (px)
 MAX_SHOTS = 48  # cap the filmstrip so a long clip stays readable
@@ -42,10 +41,6 @@ def _thumb(frame):
     return cv2.cvtColor(cv2.resize(frame, (THUMB_W, h)), cv2.COLOR_BGR2RGB)
 
 
-def _desc(fs):
-    return ShotRef(fs.v_cell_mean.copy(), fs.color_mean.copy())
-
-
 def analyze(frames, cfg=None, progress=True):
     """Run the gate + shot tracker over `frames` (an iterable of BGR arrays). Returns
     (gate, shots) where each shot is a dict with its id, group, frame range, first and
@@ -53,7 +48,7 @@ def analyze(frames, cfg=None, progress=True):
     whole clip up front (it is a batch tool), printing progress to stderr; only two
     thumbnails are kept per shot, so memory stays flat on long videos."""
     gate = Gate(cfg)
-    tracker = ShotTracker(gate.shot_z, gate.cfg.reid_z)
+    tracker = ShotTracker(gate.cfg)
     shots, cur = [], None
     fidx = -1
     for fidx, frame in enumerate(frames):
@@ -67,7 +62,7 @@ def analyze(frames, cfg=None, progress=True):
         fs, sig = gate.frame(frame)
         if fs.blank or sig.freeze:  # not a shot -> skip (as Publisher would drop it)
             continue
-        sid, gid = tracker.update(fs, sig)
+        sid, gid = tracker.update(fs, sig, fidx)
         if cur is None or sid != cur["sid"]:
             if cur is not None:
                 shots.append(cur)
@@ -80,7 +75,7 @@ def analyze(frames, cfg=None, progress=True):
                 n=1,
                 first=th,
                 rep=th,
-                first_desc=_desc(fs),
+                first_hash=int(fs.phash),
             )
         else:
             cur["gid"] = gid  # stable within a shot; keep the latest
@@ -100,19 +95,16 @@ def analyze(frames, cfg=None, progress=True):
 
 def reid_hits(gate, shots):
     """Shots that re-identified as an already-seen group, each paired with the earlier
-    occurrence it re-identified as and the re-ID score between them. We compare first
-    frames: a shot's first frame is latency-clean, whereas its `shot_id`-grouped last
-    frame is the next shot's first frame bleeding in (cut is confirmed one frame late).
-    For a recurring near-static shot the first frame is a faithful stand-in for the
-    reference the memory actually matched (the earlier occurrence's last clean frame).
-    """
+    occurrence and the Hamming distance between their first-frame pHashes (the signal
+    the memory now matches on). We compare first frames: a shot's first frame is
+    latency-clean, whereas its last frame is the next shot's first frame bleeding in
+    (cut is confirmed one frame late)."""
     last_of, hits = {}, []
     for s in shots:
         prev = last_of.get(s["gid"])
         if prev is not None:
-            q, r = s["first_desc"], prev["first_desc"]
-            z = gate.shot_z(q.luma, q.color, r.luma, r.color)
-            hits.append((s, prev, z))
+            d = bin(s["first_hash"] ^ prev["first_hash"]).count("1")
+            hits.append((s, prev, d))
         last_of[s["gid"]] = s
     return hits
 
@@ -175,7 +167,7 @@ def show(shots, hits):
                 _paint_border(ax, color(s["gid"]))
             la.set_title(f"s{s['sid']} first  (frame {s['first_id']})", fontsize=8)
             ra.set_title(
-                f"\u2190 s{prev['sid']} (frame {prev['first_id']})   z={z:.2f}",
+                f"\u2190 s{prev['sid']} (frame {prev['first_id']})   d={z}bits",
                 fontsize=8,
             )
             la.set_ylabel(f"group {s['gid']}", fontsize=9, color=color(s["gid"]))
@@ -231,7 +223,7 @@ def main(argv):
         print("re-ID hits:")
         for s, prev, z in hits:
             print(
-                f"  shot {s['sid']} -> group {s['gid']} (shot {prev['sid']}, z={z:.2f})"
+                f"  shot {s['sid']} -> group {s['gid']} (shot {prev['sid']}, d={z}bits)"
             )
     show(shots, hits)
 

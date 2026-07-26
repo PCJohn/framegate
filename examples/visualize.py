@@ -67,7 +67,7 @@ def run(src):
 
     gate = Gate()
     g = gate.cfg.grid_size
-    tracker = ShotTracker(gate.shot_z, gate.cfg.reid_z)  # shot_id + shot_group_id
+    tracker = ShotTracker(gate.cfg)  # shot_id + shot_group_id
 
     fig = plt.figure(figsize=(17, 9))
     gs = fig.add_gridspec(
@@ -209,7 +209,7 @@ def run(src):
             t_core, t_maps = (t1 - t0) * 1e3, (t2 - t1) * 1e3
 
             if not (fs.blank or sig.freeze):  # blank/frozen frames are not shots
-                sid, gid = tracker.update(fs, sig)
+                sid, gid = tracker.update(fs, sig, fidx)
 
             if sig.cut:
                 cut_frames.append(fidx - 1)

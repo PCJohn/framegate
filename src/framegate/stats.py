@@ -44,6 +44,7 @@ class FrameStats:
     struct: Optional[dict] = (
         None  # imfeat structure maps for V: "grid_0" (cells,cells,5) + "global" (5,)
     )
+    phash: int = 0  # whole-frame luma pHash (imfeat), one uint64; shot-memory key
 
     # --- per-channel grids (views; raw moments) ---
     @property
@@ -322,4 +323,5 @@ class FrameGate:
             thumb=thumb,
             hsv=hsv if keep else None,
             struct=struct,
+            phash=int(r["phash"][S.CH_V]),  # luma perceptual hash, for shot memory
         )
