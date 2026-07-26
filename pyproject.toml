@@ -7,7 +7,7 @@ name = "framegate"
 version = "0.1.0"
 description = "A fast, generic pre-pipeline gate for vision inputs (images and video frames)."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Prithvi" }]
 keywords = ["computer-vision", "shot-detection", "saliency", "video", "preprocessing"]

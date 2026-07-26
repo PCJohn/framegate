@@ -61,13 +61,15 @@ class ShotProfile:
 
     def fold(self) -> None:
         """Fold buffered frames into the integer counts. Cheap and incremental; called
-        both at the closing cut and periodically on a long take to bound the buffer."""
+        both at the closing cut and periodically on a long take to bound the buffer.
+        Clears the buffer in place so any bound reference to it (the hot-path cache in
+        ShotMemory) stays valid."""
         if self._buf:
             self.counts += (
                 _unpack(np.array(self._buf, np.uint64)).sum(0).astype(np.int32)
             )
             self.n += len(self._buf)
-            self._buf = []
+            self._buf.clear()
 
     def finalize(self) -> "ShotProfile":
         """Fold any buffered frames, then cache the per-bit log terms the scorer reads.

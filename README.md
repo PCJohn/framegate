@@ -68,16 +68,18 @@ transport (zmq, asyncio queue, ROS) can replace it later without touching the ga
 **Shot re-identification** (`shotmem.py`, `reid.py`) is what gives `shot_group_id` its
 meaning, and it's a three-layer memory. **L1** (`stream.py`) is the freeze check: a frame
 is a duplicate if it affine-matches a recent kept frame, so held frames are dropped before
-any heavy work. **L2** is the shot store: each shot's first-frame luma pHash goes into a
-[framestore](https://github.com/PCJohn/framestore) Hamming index, and at each cut the new
-shot's first frame queries it for candidate groups within `reid_maxd` (relative Hamming —
-the recall net). Each candidate is then scored by a per-bit Bernoulli model: a shot is a
-distribution over hash bits, and a frame matches if its mean per-bit log-likelihood under
-that distribution clears `reid_ll` (the precision dial). Bits that vary within a shot (a
-moving mouth) sit near 0.5 and stop penalising, so the same setup re-IDs across pose and
-speech changes — looser, and cheaper, than the old NCC heuristic. Per-frame cost is one
-list append; scoring is integer until the final compare. **L3** (`longterm.py`) is a stub
-for an offline-built, mmap-loaded prototype index (a later pass).
+any heavy work. **L2** is the shot store: a group is held as one or more *prototypes*,
+each a framestore key (a luma pHash) plus a local per-bit Bernoulli profile. At each cut
+the new shot's first frame queries the [framestore](https://github.com/PCJohn/framestore)
+Hamming index for candidate prototypes within `reid_maxd` (relative Hamming — the recall
+net), and each is scored by its Bernoulli model: a prototype is a distribution over hash
+bits, and a frame matches if its mean per-bit log-likelihood clears `reid_ll` (the
+precision dial). Bits that vary within a shot (a moving mouth) sit near 0.5 and stop
+penalising, so the same setup re-IDs across pose and speech changes — looser, and cheaper,
+than the old NCC heuristic. A near-static shot is a single prototype; one that drifts (a
+pan, a zoom) spawns more, so a recurrence of either end still matches. Per-frame cost is a
+single popcount and a list append. **L3** (`longterm.py`) is a stub for an offline-built,
+mmap-loaded prototype index (a later pass).
 
 Signals are **lazy properties**: you pay only for the ones you read. Reading
 `stats.exposure` costs nothing extra; the saliency/text/motion arrays are computed

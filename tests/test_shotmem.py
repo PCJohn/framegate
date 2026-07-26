@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import time
+
 from framegate.config import GateConfig
 from framegate.shotmem import Group, Shot, ShotMemory, ShotTracker
 
@@ -48,7 +50,7 @@ def test_near_duplicate_reids_the_same_group():
     gid, _ = m.open_shot(base)
     for _ in range(30):  # build a confident profile for the group
         m.accumulate(gid, flip(base, 1))
-    m.profile(gid).finalize()
+    m.finalize_group(gid)
     again, is_new = m.open_shot(flip(base, 3))  # a new shot, 3 bits off
     assert again == gid and is_new is False
 
@@ -59,7 +61,7 @@ def test_beyond_radius_is_never_matched():
     m = ShotMemory(reid_maxd=0.1, reid_ll=-1.0)  # ~6-bit radius, permissive score
     base = rint()
     gid, _ = m.open_shot(base)
-    m.profile(gid).finalize()
+    m.finalize_group(gid)
     far, is_new = m.open_shot(flip(base, 20))  # 20 bits > radius
     assert far != gid and is_new is True
 
@@ -125,7 +127,99 @@ def test_group_accumulates_across_recurrences():
         cut_before={6, 11},
     )
     # the third block re-identifies to group 0 (the first A), so its frames fold into
-    # the same profile -- the group's cumulative count exceeds any single shot's length.
+    # that group's prototype(s) -- the group's total count exceeds any single shot's.
     assert out[-1][1] == 0  # last frame's group is 0, i.e. A recurred
     assert isinstance(t._mem.group(0), Group)
-    assert t._mem.profile(0).finalize().n >= 10  # first A (6) + recurrence, one profile
+    t._mem.finalize_group(0)
+    total = sum(pr.profile.n for pr in t._mem.prototypes(0))
+    assert total >= 10  # first A (6) + recurrence, folded across the group's prototypes
+
+
+# --- multi-prototype drift (a shot that pans/zooms) ------------------------------
+
+
+def _monotonic_drift(m, gid, base, n=200, order=None):
+    """Feed a shot that drifts monotonically from `base` (a pan), one new bit every few
+    frames. Returns the final hash and the bit order used."""
+    order = order if order is not None else [int(b) for b in rng.permutation(64)]
+    h = base
+    for i in range(n):
+        if i and i % 4 == 0:
+            h ^= 1 << order[(i // 4) % 64]
+        m.accumulate(gid, h)
+    return h, order
+
+
+def test_small_jitter_stays_one_prototype():
+    """The common case -- a near-static shot with a few bits of frame-to-frame jitter
+    (a talking head) -- must not spawn extra prototypes."""
+    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    for _ in range(150):
+        m.accumulate(gid, flip(base, 2))
+    m.finalize_group(gid)
+    assert len(m.prototypes(gid)) == 1
+
+
+def test_drift_spawns_prototypes_and_reids_both_ends():
+    """A shot that drifts far spawns local prototypes, and a later recurrence near
+    either end -- the start or the drifted end -- re-identifies to the same group,
+    which a single shot-wide profile could not do."""
+    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    end, order = _monotonic_drift(m, gid, base)
+    m.finalize_group(gid)
+    assert len(m.prototypes(gid)) > 1  # the drift was covered by several prototypes
+
+    g_start, new_start = m.open_shot(base ^ (1 << order[0]))
+    g_end, new_end = m.open_shot(end ^ (1 << order[1]))
+    assert (g_start, new_start) == (gid, False)
+    assert (g_end, new_end) == (gid, False)
+
+
+def test_distinct_shots_still_separate_with_prototypes():
+    """Prototypes must not over-merge: a genuinely different setup is still a new group,
+    even after the first shot has spread into several prototypes."""
+    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    a = rint()
+    ga, _ = m.open_shot(a)
+    _monotonic_drift(m, ga, a)
+    m.finalize_group(ga)
+    b = rint()  # unrelated, ~32 bits from a
+    gb, new_b = m.open_shot(b)
+    assert new_b is True and gb != ga
+
+
+def test_accumulate_is_nanoseconds_per_frame(capsys):
+    """The per-frame drift check is the whole cost accumulate adds. It must stay a
+    single popcount against the active prototype in the common (near) case."""
+    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    hs = [flip(base, 2) for _ in range(100_000)]  # near frames -> fast path every time
+    t = time.perf_counter()
+    for h in hs:
+        m.accumulate(gid, h)
+    ns = (time.perf_counter() - t) / len(hs) * 1e9
+    with capsys.disabled():
+        print(f"\n  shotmem accumulate per frame: {ns:.0f} ns")
+    assert len(m.prototypes(gid)) == 1  # jitter stayed in one prototype
+    assert ns < 3000  # generous for CI; the check itself is ~100 ns
+
+
+def test_hot_cache_survives_buffer_fold():
+    """The hot path caches the active prototype's buffer and its bound append; a fold
+    that fires mid-shot (buffer past its bound) must clear that buffer in place, not
+    replace it, or the cache would append into a discarded list and silently drop
+    frames."""
+    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    for _ in range(9000):  # > the 4096 fold bound, so a fold fires during accumulate
+        m.accumulate(gid, flip(base, 2))
+    m.finalize_group(gid)
+    _, _, buf, _ = m._hot[gid]
+    assert buf is m.prototypes(gid)[0].profile._buf  # same object across folds
+    assert sum(pr.profile.n for pr in m.prototypes(gid)) == 9000  # nothing dropped

@@ -2,29 +2,37 @@
 wide / A / B setups a dialogue or cross-cut keeps returning to -- so each shot gets a
 unique `shot_id` and a `shot_group_id` shared by every recurrence of the same setup.
 
-Two stages, cheap-then-precise. A framestore index over one uint64 pHash per stored
-shot gives the recall net: a new shot's first-frame hash retrieves candidate groups
-within a generous Hamming radius in microseconds. Each candidate is then scored by the
-per-bit Bernoulli model (reid.ShotScorer) -- the mean log-likelihood that the frame was
-drawn from that group's learned bit distribution -- and the best above `reid_ll` wins.
-The retrieval is loose on purpose and the precision comes from scoring, which is what
-lets the same setup re-ID across the pose and speech changes a talking head goes
-through (see reid.py). framestore stays a pure Hamming index; all the probability lives
-here.
+Two stages, cheap-then-precise. A framestore index over luma pHashes gives the recall
+net: a new shot's first-frame hash retrieves candidates within a generous Hamming
+radius in microseconds. Each candidate is then scored by the per-bit Bernoulli model
+(reid.ShotScorer) -- the mean log-likelihood that the frame was drawn from that
+candidate's learned bit distribution -- and the best-scoring group above `reid_ll`
+wins. Retrieval is loose on purpose; precision comes from scoring, which is what lets
+the same setup re-ID across the pose and speech changes a talking head goes through
+(see reid.py). framestore stays a pure Hamming index; all the probability lives here.
 
-`ShotMemory` owns the store, the per-group `ShotProfile`s, and the per-shot metadata.
+A group is held as one or more *prototypes*, each a (framestore key, local Bernoulli
+profile). A near-static shot is a single prototype; a shot that drifts (a pan, a zoom)
+spawns more, so both recall and scoring stay tight to the part of the shot they cover
+instead of blurring into one shot-wide average.
+
+`ShotMemory` owns the store, the groups and their prototypes, and drives the matching.
 `ShotTracker` drives it from the per-frame gate outputs, accumulating the current
 shot's frames and closing / opening groups at each cut.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 import framestore  # type: ignore[import-untyped]  # framestore needs a py.typed marker
 
 from .reid import ShotProfile, ShotScorer
+
+
+def _hamming(a: int, b: int) -> int:
+    return (a ^ b).bit_count()  # requires Python 3.10+ (see requires-python)
 
 
 @dataclass
@@ -41,67 +49,143 @@ class Shot:
 
 
 @dataclass
-class Group:
-    """A re-identifiable setup: its framestore key (first-frame hash), the Bernoulli
-    profile accumulated over every frame ever assigned to it, and the shots that are
-    recurrences of it."""
+class Prototype:
+    """One local appearance within a group: a framestore key and the Bernoulli profile
+    of the frames that landed nearest it. A shot that drifts (a pan, a zoom) spawns
+    several, so both recall (the key) and scoring (the local profile) stay tight to the
+    part of the shot they cover, instead of blurring into one shot-wide average."""
 
+    key: int
     group_id: int
     profile: ShotProfile
+
+
+@dataclass
+class Group:
+    """A re-identifiable setup, held as one or more local prototypes. It starts with a
+    single prototype (the first frame); a frame that drifts past `reid_maxd` from every
+    existing prototype's key spawns a new one. Recall retrieves prototypes by key; a
+    group's match score is the best over its prototypes, so the drifted end of a shot
+    matches its own local prototype rather than the shot-wide mean."""
+
+    group_id: int
+    prototypes: List[Prototype]
     member_shot_ids: List[int] = field(default_factory=list)
 
 
 class ShotMemory:
     """Assigns shot group ids by loose pHash re-identification. `open_shot(hash)` at a
-    cut retrieves candidate groups from the store, scores the first frame against each,
-    and either re-IDs the best (score >= reid_ll) or creates a new group keyed on that
-    hash. `accumulate(gid, hash)` folds a frame into a group's profile."""
+    cut retrieves candidate prototypes from the store, scores the query against each
+    one's local Bernoulli profile, takes the best per group, and either re-IDs the best
+    group (score >= reid_ll) or creates a new one. `accumulate(gid, hash)` folds a frame
+    into the nearest prototype of its group, spawning a new prototype when the frame has
+    drifted past reid_maxd from all existing ones."""
 
     def __init__(self, reid_maxd: float, reid_ll: float) -> None:
         self._maxd = reid_maxd
+        self._maxbits = int(reid_maxd * 64)  # recall radius in bits
+        # A prototype's profile covers frames within `spawn` bits of its key, so a new
+        # prototype spawns at half the recall radius: the clouds overlap and no frame
+        # lands in a scoring dead zone between two centres, while recall still reaches
+        # anything within the full radius.
+        self._spawnbits = max(1, self._maxbits // 2)
         self._ll = reid_ll
         self._store = framestore.Store()
         self._scorer = ShotScorer()
         self._groups: Dict[int, Group] = {}
-        self._by_slot: Dict[int, int] = {}  # framestore id -> group_id
+        self._by_slot: Dict[int, Prototype] = {}  # framestore id -> prototype
+        # Per-group hot cache: the active prototype pre-unpacked into the four things
+        # accumulate touches, so the frame path walks no attributes and calls no
+        # property. Rebuilt only when the active prototype changes (on drift).
+        self._hot: Dict[int, Tuple[int, Any, list, ShotProfile]] = {}
         self._n = 0
 
     def open_shot(self, first_hash: int) -> Tuple[int, bool]:
         """Return (group_id, is_new) for a shot opening on `first_hash`."""
         gid = self._match(first_hash)
         if gid is None:
-            gid = self._new_group(first_hash)
-            return gid, True
+            return self._new_group(first_hash), True
         return gid, False
 
     def accumulate(self, gid: int, frame_hash: int) -> None:
-        p = self._groups[gid].profile
-        p.add(frame_hash)
-        if p.pending >= 4096:  # bound the open-shot buffer on very long takes
-            p.fold()
+        """Fold a frame into the active prototype of its group. The hot path is a single
+        popcount against the prototype's key and one list append. Only a frame that
+        drifts past the spawn radius (rare) leaves it, to search for or spawn a nearer
+        prototype."""
+        key, append, buf, profile = self._hot[gid]
+        if (frame_hash ^ key).bit_count() <= self._spawnbits:
+            append(frame_hash)
+            if len(buf) >= 4096:  # bound an open prototype's buffer on very long takes
+                profile.fold()
+            return
+        self._drift(gid, int(frame_hash))
+
+    def _drift(self, gid: int, h: int) -> None:
+        pr = self._nearest_or_new(self._groups[gid], h)
+        pr.profile.add(h)
+        buf = pr.profile._buf
+        self._hot[gid] = (pr.key, buf.append, buf, pr.profile)
+
+    def _nearest_or_new(self, g: Group, h: int) -> Prototype:
+        best, best_d = g.prototypes[0], _hamming(h, g.prototypes[0].key)
+        for pr in g.prototypes[1:]:
+            d = _hamming(h, pr.key)
+            if d < best_d:
+                best, best_d = pr, d
+        if best_d <= self._spawnbits:
+            return best
+        return self._add_prototype(g, h)  # drifted past every prototype -> new one
+
+    def _add_prototype(self, g: Group, h: int) -> Prototype:
+        pr = Prototype(h, g.group_id, ShotProfile(h))
+        g.prototypes.append(pr)
+        slot = int(self._store.insert(np.array([h], np.uint64))[0])
+        self._by_slot[slot] = pr
+        return pr
 
     def _match(self, q_hash: int) -> Optional[int]:
         if self._n == 0:
             return None
         _, ids = self._store.query(int(q_hash), k=None, max_dist=self._maxd)
-        cand = [self._by_slot[int(s)] for s in ids]
-        if not cand:
+        seen: Dict[int, Prototype] = {}
+        for (
+            s
+        ) in ids:  # several keys of one prototype can be returned; dedup by identity
+            pr = self._by_slot[int(s)]
+            seen.setdefault(id(pr), pr)
+        if not seen:
             return None
-        profs = [self._groups[g].profile.finalize() for g in cand]
-        scores = self._scorer.score(int(q_hash), profs)
-        best = int(np.argmax(scores))
-        return cand[best] if scores[best] >= self._ll else None
+        protos = list(seen.values())
+        scores = self._scorer.score(
+            int(q_hash), [pr.profile.finalize() for pr in protos]
+        )
+        best_by_group: Dict[int, float] = {}
+        for pr, sc in zip(protos, scores):  # a group's score is its best prototype
+            if sc > best_by_group.get(pr.group_id, -np.inf):
+                best_by_group[pr.group_id] = float(sc)
+        gid, sc = max(best_by_group.items(), key=lambda kv: kv[1])
+        return gid if sc >= self._ll else None
 
     def _new_group(self, first_hash: int) -> int:
         gid = self._n
         self._n += 1
-        self._groups[gid] = Group(gid, ShotProfile(first_hash))
-        slot = int(self._store.insert(np.array([first_hash], np.uint64))[0])
-        self._by_slot[slot] = gid
+        h = int(first_hash)
+        pr = Prototype(h, gid, ShotProfile(h))
+        self._groups[gid] = Group(gid, [pr])
+        buf = pr.profile._buf
+        self._hot[gid] = (pr.key, buf.append, buf, pr.profile)
+        slot = int(self._store.insert(np.array([h], np.uint64))[0])
+        self._by_slot[slot] = pr
         return gid
 
-    def profile(self, gid: int) -> ShotProfile:
-        return self._groups[gid].profile
+    def finalize_group(self, gid: int) -> None:
+        """Fold every prototype of a group -- called when a shot closes so its frames
+        are counted before the next match scores against them."""
+        for pr in self._groups[gid].prototypes:
+            pr.profile.finalize()
+
+    def prototypes(self, gid: int) -> List[Prototype]:
+        return self._groups[gid].prototypes
 
     def group(self, gid: int) -> Group:
         return self._groups[gid]
@@ -154,7 +238,7 @@ class ShotTracker:
 
     def _close_shot(self, end_frame: int) -> None:
         gid = self.shot_group_id
-        self._mem.profile(gid).finalize()
+        self._mem.finalize_group(gid)
         self._mem.group(gid).member_shot_ids.append(self.shot_id)
         self._shots.append(
             Shot(
