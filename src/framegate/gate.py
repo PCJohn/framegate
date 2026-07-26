@@ -59,8 +59,3 @@ class Gate:
             fs = self._gate.process(frame)
             self._last_frame, self._last_stats = frame, fs
         return fs, self._stream.update(fs)
-
-    def shot_z(self, luma_a, color_a, luma_b, color_b) -> float:
-        """Re-ID dissimilarity (cut-score scale, MAD-normalized) between two frame
-        descriptors. Used to match a new shot against remembered shot groups."""
-        return self._stream.shot_z(luma_a, color_a, luma_b, color_b)

@@ -65,13 +65,19 @@ assume every `Packet` is worth the heavy pipeline. Read the return of `publish(f
 fan-out, so a real
 transport (zmq, asyncio queue, ROS) can replace it later without touching the gate.
 
-**Shot re-identification** (`shotmem.py`) is what gives `shot_group_id` its meaning. At
-each cut the new shot's first frame is matched against remembered shots using the *same*
-NCC + median/MAD kernel as cut detection (`StreamAnalyzer.shot_z`, reusing the cut machinery
-with looser thresholds — an absolute ceiling `reid_maxd` (the main leniency dial) and a
-robust backstop `reid_z`), so recurring shots collapse onto one group id at near-zero
-extra cost. Retrieval is an O(K) scan today, isolated behind `ShotMemory`'s index so it can be
-swapped for an LSH/ANN index later without touching the match logic.
+**Shot re-identification** (`shotmem.py`, `reid.py`) is what gives `shot_group_id` its
+meaning, and it's a three-layer memory. **L1** (`stream.py`) is the freeze check: a frame
+is a duplicate if it affine-matches a recent kept frame, so held frames are dropped before
+any heavy work. **L2** is the shot store: each shot's first-frame luma pHash goes into a
+[framestore](https://github.com/PCJohn/framestore) Hamming index, and at each cut the new
+shot's first frame queries it for candidate groups within `reid_maxd` (relative Hamming —
+the recall net). Each candidate is then scored by a per-bit Bernoulli model: a shot is a
+distribution over hash bits, and a frame matches if its mean per-bit log-likelihood under
+that distribution clears `reid_ll` (the precision dial). Bits that vary within a shot (a
+moving mouth) sit near 0.5 and stop penalising, so the same setup re-IDs across pose and
+speech changes — looser, and cheaper, than the old NCC heuristic. Per-frame cost is one
+list append; scoring is integer until the final compare. **L3** (`longterm.py`) is a stub
+for an offline-built, mmap-loaded prototype index (a later pass).
 
 Signals are **lazy properties**: you pay only for the ones you read. Reading
 `stats.exposure` costs nothing extra; the saliency/text/motion arrays are computed
@@ -444,7 +450,9 @@ framegate/
 │   ├── stream.py          # StreamAnalyzer + TemporalSignals (temporal layer)
 │   ├── gate.py            # Gate facade + lossless duplicate skip
 │   ├── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
-│   └── shotmem.py         # ShotMemory + ShotTracker: shot re-identification (shot_group_id)
+│   ├── shotmem.py         # ShotMemory + ShotTracker: shot re-identification (L2)
+│   ├── reid.py            # per-bit Bernoulli shot model (ShotProfile, ShotScorer)
+│   └── longterm.py        # L3 mmap prototype-index stub
 ├── examples/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
 │   ├── shots.py           # batch shot analyzer: filmstrip + re-ID verification (matplotlib)
@@ -457,7 +465,9 @@ framegate/
     ├── test_config.py     # YAML template parity, overrides, immutability
     ├── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
     ├── test_publish.py    # Publisher drop policy + frame_id / shot_id / shot_group_id
-    └── test_shotmem.py    # ShotMemory id assignment, threshold, drift, retrieval seam
+    ├── test_structure.py  # structure-tensor feature plumbing
+    ├── test_reid.py       # per-bit Bernoulli scorer: exactness, loose-match, latency
+    └── test_shotmem.py    # ShotMemory + ShotTracker: group ids, recall+score, metadata, ABAB
 ```
 
 All visualization and timing code lives in `examples/` — the library itself contains

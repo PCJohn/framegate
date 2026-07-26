@@ -42,28 +42,40 @@ class ShotProfile:
     later score is a masked add with no table lookup -- the scoring hot path never
     touches the counts again."""
 
-    __slots__ = ("key_hash", "n", "counts", "log1", "log0", "denom", "_buf")
+    __slots__ = ("key_hash", "n", "counts", "log1", "log0", "_buf")
 
     def __init__(self, first_hash: int) -> None:
         self.key_hash = int(first_hash)  # first-frame hash; the framestore key
         self.n = 0
         self.counts = np.zeros(BITS, np.int32)
         self.log1 = self.log0 = None  # log P(bit=1), log P(bit=0), set at finalize
-        self.denom = 0.0
         self._buf: list = []
 
     def add(self, h: int) -> None:
         self._buf.append(int(h))
 
-    def finalize(self) -> "ShotProfile":
-        """Fold buffered frames into counts and cache the per-bit log terms. Idempotent
-        across repeated calls (re-folds only what is newly buffered)."""
+    @property
+    def pending(self) -> int:
+        """Frames buffered but not yet folded into counts."""
+        return len(self._buf)
+
+    def fold(self) -> None:
+        """Fold buffered frames into the integer counts. Cheap and incremental; called
+        both at the closing cut and periodically on a long take to bound the buffer."""
         if self._buf:
             self.counts += (
                 _unpack(np.array(self._buf, np.uint64)).sum(0).astype(np.int32)
             )
             self.n += len(self._buf)
             self._buf = []
+
+    def finalize(self) -> "ShotProfile":
+        """Fold any buffered frames, then cache the per-bit log terms the scorer reads.
+        Idempotent and cheap on a no-op, so scoring can call it freely: recomputes the
+        log terms only when a frame was actually folded in."""
+        if not self._buf and self.log1 is not None:
+            return self
+        self.fold()
         p = (self.counts + 0.5) / (self.n + 1.0)  # Jeffreys-smoothed bit probabilities
         self.log1 = np.log(p)
         self.log0 = np.log(1.0 - p)

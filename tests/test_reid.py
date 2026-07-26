@@ -141,3 +141,20 @@ def test_finalize_and_score_are_microseconds(capsys):
         print(f"  reid finalize (300 frames): {fin_us:.1f} us")
         print(f"  reid score 8 candidates:    {score_us:.1f} us")
     assert fin_us < 500 and score_us < 200
+
+
+def test_periodic_fold_matches_single_fold():
+    """A long take folds its buffer periodically to bound memory; the resulting counts
+    and scores must be identical to folding once at the end."""
+    frames = rint(10000)
+    incremental = ShotProfile(int(frames[0]))
+    for f in frames:
+        incremental.add(int(f))
+        if incremental.pending >= 4096:
+            incremental.fold()
+    incremental.finalize()
+
+    single = profile(frames)
+    assert incremental.n == single.n == 10000
+    assert np.array_equal(incremental.counts, single.counts)
+    assert np.allclose(incremental.log1, single.log1)

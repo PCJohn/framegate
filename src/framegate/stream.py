@@ -51,21 +51,18 @@ class _RollingRobust:
         n = a.size
         return 0.5 * (a[(n - 1) // 2] + a[n // 2])
 
-    def z(self, x: float) -> float:
-        """Robust z-score of x against the trailing window, WITHOUT recording it.
-        0.0 until the window has min_samples (baseline not yet trusted)."""
+    def score(self, x: float) -> float:
+        """Robust z-score of x against the trailing window, then record x. 0.0 until the
+        window has min_samples (baseline not yet trusted). x is scored against the window
+        *before* being added, so an event can't inflate its own baseline."""
         if len(self._buf) < self._min:
+            self._buf.append(x)
             return 0.0
         a = np.fromiter(self._buf, np.float32)
         med = self._median_sorted(a)
-        return float(
-            (x - med) / (1.4826 * self._median_sorted(np.abs(a - med)) + self._eps)
-        )
-
-    def score(self, x: float) -> float:
-        s = self.z(x)
+        z = (x - med) / (1.4826 * self._median_sorted(np.abs(a - med)) + self._eps)
         self._buf.append(x)
-        return s
+        return float(z)
 
 
 class StreamAnalyzer:
@@ -119,14 +116,16 @@ class StreamAnalyzer:
         b = float(cur.mean() - a * prev.mean())
         return a, b, cur - (a * prev + b)
 
-    def _frozen(self, luma, V) -> bool:
+    def _frozen(self, luma, V, resid_prev) -> bool:
         """L1: does this frame affine-match any frame in the ring? The affine fit
-        absorbs a global brightness/contrast change; |dV| catches an exposure shift
-        the fit's own recentring would otherwise hide. Cheap -- a handful of (G,G)
-        array ops per ring entry, and G is the thumbnail cell count."""
+        absorbs a global brightness/contrast change; |dV| catches an exposure shift the
+        fit's own recentring would hide. The newest ring entry is t-1, whose fit the
+        caller already computed for the motion annotation -- pass it as `resid_prev` so
+        the common freeze_win=1 case does no extra fit at all."""
         eps = self.cfg.freeze_eps
-        for pl, pv in self._l1:
-            _, _, resid = self._affine(pl, luma)
+        newest = len(self._l1) - 1
+        for i, (pl, pv) in enumerate(self._l1):
+            resid = resid_prev if i == newest else self._affine(pl, luma)[2]
             if float(np.sqrt((resid**2).mean())) + abs(V - pv) < eps:
                 return True
         return False
@@ -151,16 +150,6 @@ class StreamAnalyzer:
         luma_corr = self._luma_corr(prev_luma, cur_luma)
         color = float(np.linalg.norm(prev_color - cur_color)) / (255.0 * c.color_maxd)
         return max(1.0 - luma_corr, color), luma_corr
-
-    def shot_z(self, luma_a, color_a, luma_b, color_b) -> float:
-        """Re-ID dissimilarity between two frame descriptors on the cut-score scale:
-        the same max(1 - NCC, colour-shift) as a cut, robust-normalized by the current
-        within-shot median+MAD baseline (non-mutating -- this comparison is not a
-        consecutive-frame transition, so it must not enter the cut baseline). Returns
-        +inf past the absolute re-ID ceiling (`reid_maxd`), which also keeps a cold/tiny
-        baseline (z=0) from forcing a spurious match on clearly-different shots."""
-        d, _ = self._cut_score(luma_a, color_a, luma_b, color_b)
-        return float("inf") if d > self.cfg.reid_maxd else self._roll.z(d)
 
     def update(self, fs) -> TemporalSignals:
         c = self.cfg
@@ -197,10 +186,9 @@ class StreamAnalyzer:
         cut_frame = self._idx_prev if cut else -1
         self._s2, self._s1, self._o1 = self._s1, cut_score, outlier
 
-        # L1: frozen if this frame affine-matches ANY recent kept frame, not just t-1
-        # (the ring's newest entry is t-1, so freeze_win=1 is the old behaviour). The
-        # motion annotation above stays strictly vs t-1; only the decision scans back.
-        freeze = self._frozen(luma, V) and not cut and self._cut_cd == 0
+        # L1: frozen if this frame affine-matches any recent kept frame. The newest ring
+        # entry is t-1, whose residual we already have; only a wider window costs extra.
+        freeze = self._frozen(luma, V, resid) and not cut and self._cut_cd == 0
 
         self._vhist.append(V)
         hist = np.fromiter(self._vhist, np.float32)

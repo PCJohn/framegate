@@ -54,11 +54,11 @@ class GateConfig:
     reid_maxd: float = 0.25  # candidate radius: relative Hamming in [0,1]
     reid_ll: float = -0.28  # match if mean per-bit log-likelihood >= this
     min_scene_len: int = 6  # min frames between cuts (debounce)
-    # L1 memory: a frame is frozen if it affine-matches ANY of the last freeze_win kept
-    # frames (not just the previous one), so a flicker between two held frames still
-    # reads as frozen. freeze_win=1 is the strict previous-frame-only behaviour.
-    freeze_eps: float = 0.35  # residual-RMS + |dV| below this -> frozen frame
-    freeze_win: int = 3  # L1 ring: compare against this many recent kept frames
+    # L1 memory: a frame is frozen if it affine-matches any of the last freeze_win kept
+    # frames. freeze_win=1 compares against the previous frame only (two-frame L1, the
+    # default); a larger window lets a flicker between two held frames still read frozen.
+    freeze_eps: float = 0.275  # residual-RMS + |dV| below this -> frozen frame
+    freeze_win: int = 1  # L1 ring: recent kept frames to compare against
 
     # --- free temporal signals ---
     flicker_win: int = 32  # brightness-history length (also flicker FFT length)

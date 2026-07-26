@@ -75,7 +75,10 @@ class ShotMemory:
         return gid, False
 
     def accumulate(self, gid: int, frame_hash: int) -> None:
-        self._groups[gid].profile.add(frame_hash)
+        p = self._groups[gid].profile
+        p.add(frame_hash)
+        if p.pending >= 4096:  # bound the open-shot buffer on very long takes
+            p.fold()
 
     def _match(self, q_hash: int) -> Optional[int]:
         if self._n == 0:

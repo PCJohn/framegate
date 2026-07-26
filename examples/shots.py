@@ -44,8 +44,8 @@ def _thumb(frame):
 def analyze(frames, cfg=None, progress=True):
     """Run the gate + shot tracker over `frames` (an iterable of BGR arrays). Returns
     (gate, shots) where each shot is a dict with its id, group, frame range, first and
-    representative thumbnails, and first descriptor (for re-ID scoring). Processes the
-    whole clip up front (it is a batch tool), printing progress to stderr; only two
+    representative thumbnails, and first-frame pHash (for re-ID verification). Processes
+    the whole clip up front (it is a batch tool), printing progress to stderr; only two
     thumbnails are kept per shot, so memory stays flat on long videos."""
     gate = Gate(cfg)
     tracker = ShotTracker(gate.cfg)
