@@ -455,7 +455,7 @@ framegate/
 │   └── longterm.py        # L3 mmap prototype-index stub
 ├── examples/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
-│   ├── shots.py           # batch shot analyzer: filmstrip + re-ID verification (matplotlib)
+│   ├── shots.py           # live shot re-ID viewer: groups build up as the video plays
 │   ├── benchmark.py       # latency measurement
 │   └── publish.py         # Publisher demo: drops frames, prints shot_id + shot_group_id
 └── tests/
@@ -479,7 +479,7 @@ no matplotlib or benchmarking code.
 python examples/visualize.py path/to/video.mp4     # needs [viz]
 python examples/benchmark.py                        # synthetic, or pass a video path
 python examples/publish.py                          # publishing gate (synthetic, or pass a video)
-python examples/shots.py                            # shot filmstrip + re-ID check (synthetic, or a video)
+python examples/shots.py                            # live shot re-ID viewer (synthetic, or pass a video)
 pytest                                              # needs [dev]; -s prints latencies
 ```
 
