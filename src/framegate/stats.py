@@ -12,6 +12,9 @@ import imfeat
 import numpy as np
 
 from . import signals as S
+
+_F = len(imfeat.FEATURE_NAMES)  # 38 features per channel in a pyramid map
+_C = 3  # HSV
 from .config import GateConfig
 
 
@@ -292,24 +295,24 @@ class FrameGate:
         h, w = frame.shape[:2]
         keep = self.cfg.return_frames
         hsv, thumb = self._to_hsv(frame, keep)
-        r = self._feat.features(hsv)
-        chan = r["mom_global"].astype(np.float32)
-        grids = tuple(
-            r[f"mom_{i}"].astype(np.float32) for i in range(self.cfg.n_levels)
-        )
+        p = self._feat.features(hsv)
+        chan = p.moments[-1].astype(np.float32)  # the 1-cell global level is last
+        grids = tuple(m.astype(np.float32) for m in p.moments[: self.cfg.n_levels])
         grid = grids[
             0
         ]  # finest = output-map resolution; coarser levels feed multi-scale signals
 
         # Structure-tensor features, from the same pass and the same cells. imfeat
         # computes them for H, S and V; the signals below read V.
-        # Copied, not sliced: imfeat returns one flat buffer per level and slices it
-        # into views, so keeping a view would retain the whole level (~400 KB) for as
-        # long as this FrameStats lives -- and these outlive the frame, in the rolling
-        # windows. The copy is ~20 KB and lands contiguous for the properties below.
+        # p.maps[i] is (H, W, C*F) with the channel axis C-major over FEATURE_NAMES,
+        # so one reshape recovers (H, W, C, F) as a view. Copied, not sliced: a view
+        # would retain the whole level (~400 KB) for as long as this FrameStats lives,
+        # and these outlive the frame in the rolling windows. The copy is ~20 KB and
+        # lands contiguous for the properties below.
+        fine = p.maps[0].reshape(*p.maps[0].shape[:2], _C, _F)
         struct = {
-            "grid_0": r["struct_0"][:, :, S.CH_V, :].copy(),
-            "global": r["struct_global"][S.CH_V].copy(),
+            "grid_0": fine[:, :, S.CH_V, S.SE].copy(),
+            "global": p.maps[-1].reshape(_C, _F)[S.CH_V, S.SE].copy(),
         }
 
         # Blank = nothing to track: flat everywhere (no cell-level intensity spread) OR
@@ -317,8 +320,9 @@ class FrameGate:
         # imfeat's per-level cross-cell summaries (free, same pass) -- no numpy reduction
         # here, so the cost is O(1) in grid size.
         blank = (
-            float(r["mom_summary_0"][S.M_VAR, S.CH_V, S.ST_MAX]) < self.cfg.solid_thresh
-            or float(r["struct_summary_0"][S.SE_ENERGY, S.CH_V, S.ST_MAX])
+            float(p.summary[0][S.F_MOM + S.M_VAR, S.CH_V, S.ST_MAX])
+            < self.cfg.solid_thresh
+            or float(p.summary[0][S.F_SE + S.SE_ENERGY, S.CH_V, S.ST_MAX])
             < self.cfg.edge_thresh
         )
 
@@ -332,5 +336,7 @@ class FrameGate:
             thumb=thumb,
             hsv=hsv if keep else None,
             struct=struct,
-            phash=int(r["phash"][S.CH_V]),  # luma perceptual hash, for shot memory
+            phash=int(
+                p.hashes[imfeat.HASHES.index("phash"), S.CH_V]
+            ),  # luma, for shot memory
         )

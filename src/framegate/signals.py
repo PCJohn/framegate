@@ -6,6 +6,7 @@ constants live here because this is the lowest layer that indexes the grids.
 """
 
 import cv2
+import imfeat
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
@@ -16,6 +17,13 @@ M_MEAN, M_VAR, M_M3, M_M4 = 0, 1, 2, 3
 
 # imfeat structure-tensor channel layout (imfeat.FEATURES order).
 SE_ENERGY, SE_COH, SE_OC, SE_OS, SE_CORN = 0, 1, 2, 3, 4
+
+# Offsets into imfeat's FEATURE_NAMES axis (F = 38): the structure-tensor block leads,
+# the MOMENTS block trails. SE is the slice that pulls the five structure features out
+# of a (.., C, F) view of a pyramid map.
+F_SE = 0
+F_MOM = len(imfeat.FEATURE_NAMES) - len(imfeat.MOMENTS)
+SE = slice(F_SE, F_SE + len(imfeat.FEATURES))
 
 # imfeat cross-cell summary layout: last axis of every "*_summary_i" map, in
 # imfeat.SUMMARY_STATS order. Each summary is (n_feat, C, 4); e.g. the peak V
