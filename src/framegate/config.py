@@ -27,6 +27,7 @@ class GateConfig:
     # --- frame extraction ---
     thumb: int = 256  # thumbnail side for stats
     stride: int = 2  # grid stride; >1 = indexed-gather over a subsample
+    feat_threads: int = 2  # imfeat worker threads; output is bit-identical at any count
     grid_exp: int = 5  # 2^grid_exp cells/dim (5 -> 32x32); output/finest level
     n_levels: int = 4  # dyadic pyramid levels from grid_exp (5,4,3,2 -> 32..4)
     solid_thresh: float = 1.0  # blank if max V cell-variance < this

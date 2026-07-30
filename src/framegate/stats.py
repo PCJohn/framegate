@@ -243,7 +243,11 @@ class FrameGate:
     """Per-frame extractor. Owns reusable buffers and one FeatureComputer; no
     temporal state, so it works identically on a still image or a video frame.
     Accepts BGR (H,W,3) or grayscale (H,W)/(H,W,1) uint8 input. Not thread-safe
-    (the scratch buffers are reused per call); use one FrameGate per stream."""
+    (the scratch buffers are reused per call); use one FrameGate per stream.
+
+    Holds one imfeat worker pool of `cfg.feat_threads` threads, spawned here and
+    parked between frames. One pool per FrameGate, so N streams mean N pools --
+    budget against imfeat.cpu_count() if other real-time work shares the CPU."""
 
     def __init__(self, cfg: Optional[GateConfig] = None):
         self.cfg = cfg or GateConfig()
@@ -254,6 +258,7 @@ class FrameGate:
             shape=(t, t, 3),
             grid=[(e, e) for e in self.cfg.pyramid_exps],
             stride=self.cfg.stride,
+            threads=self.cfg.feat_threads,
         )
         self._bgr = np.empty(
             (t, t, 3), np.uint8
@@ -298,9 +303,13 @@ class FrameGate:
 
         # Structure-tensor features, from the same pass and the same cells. imfeat
         # computes them for H, S and V; the signals below read V.
+        # Copied, not sliced: imfeat returns one flat buffer per level and slices it
+        # into views, so keeping a view would retain the whole level (~400 KB) for as
+        # long as this FrameStats lives -- and these outlive the frame, in the rolling
+        # windows. The copy is ~20 KB and lands contiguous for the properties below.
         struct = {
-            "grid_0": r["struct_0"][:, :, S.CH_V, :],
-            "global": r["struct_global"][S.CH_V],
+            "grid_0": r["struct_0"][:, :, S.CH_V, :].copy(),
+            "global": r["struct_global"][S.CH_V].copy(),
         }
 
         # Blank = nothing to track: flat everywhere (no cell-level intensity spread) OR
