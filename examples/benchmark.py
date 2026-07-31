@@ -298,7 +298,7 @@ def run_synthetic():
     finally:
         cv2.setNumThreads(dflt)
 
-    _header("[6] input-size sweep (default config: grid 32, 4-level pyramid, stride 2)")
+    _header("[6] input-size sweep (default config: grid 64, 6-level pyramid, stride 4)")
     # measured per-resolution (frames freed between) so 4K doesn't blow up memory; the
     # cross-resolution signal is large, so sequential measurement is fine here
     for name, h, w in RESOLUTIONS:
@@ -318,13 +318,13 @@ def run_synthetic():
         del fr
 
     _header(
-        "[7] grid-size sweep (1080p, default stride 2)  -- grid = 2**grid_exp cells/dim"
+        "[7] grid-size sweep (1080p, default stride 4)  -- grid = 2**grid_exp cells/dim"
     )
     res = _bench_group(
         _cfg_items(
             [
                 (f"grid_exp={ge}  ({2**ge}x{2**ge} cells)", GateConfig(grid_exp=ge))
-                for ge in (4, 5, 6)
+                for ge in (5, 6)
             ],
             frames,
         )
@@ -332,7 +332,7 @@ def run_synthetic():
     for label in res:
         _print(label, res[label])
 
-    _header("[8] stride sweep (1080p, grid 32)  -- imfeat pixel subsampling")
+    _header("[8] stride sweep (1080p, grid 64)  -- imfeat pixel subsampling")
     res = _bench_group(
         _cfg_items(
             [(f"stride={st}", GateConfig(stride=st)) for st in (1, 2, 3, 4)], frames
@@ -341,10 +341,10 @@ def run_synthetic():
     for label in res:
         _print(label, res[label])
 
-    _header("[9] thumb-size sweep (1080p, grid 32, default stride 2)")
+    _header("[9] thumb-size sweep (1080p, grid 64, default stride 4)")
     res = _bench_group(
         _cfg_items(
-            [(f"thumb={tb}", GateConfig(thumb=tb)) for tb in (64, 96, 128, 192, 256)],
+            [(f"thumb={tb}", GateConfig(thumb=tb)) for tb in (512, 1024, 2048)],
             frames,
         )
     )
@@ -352,13 +352,13 @@ def run_synthetic():
         _print(label, res[label])
 
     _header(
-        "[10] pyramid-depth sweep (1080p, grid 32, stride 2)  -- n_levels = grids per pass"
+        "[10] pyramid-depth sweep (1080p, grid 64, stride 4)  -- n_levels = grids per pass"
     )
     res = _bench_group(
         _cfg_items(
             [
-                (f"n_levels={nl}  (32..{2**(5 - nl + 1)})", GateConfig(n_levels=nl))
-                for nl in (1, 2, 3, 4)
+                (f"n_levels={nl}  (64..{2**(6 - nl + 1)})", GateConfig(n_levels=nl))
+                for nl in (1, 2, 4, 6)
             ],
             frames,
         )

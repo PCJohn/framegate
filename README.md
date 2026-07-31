@@ -6,8 +6,8 @@ or video frame to get cheap, broadly-useful signals, then let a heavy model
 
 It is deliberately *generic*: no task-specific heuristics, no per-dataset tuning.
 Everything is derived from cheap per-cell colour/luma statistics computed on a small
-thumbnail, so a single call costs about 1.5-2 ms on a 1080p frame on a modern laptop --
-and tunes down to well under 1 ms when you need it (hardware-dependent; see Performance).
+thumbnail, so a single call costs a few ms on a 1080p frame on a modern laptop -- and
+tunes down to well under 1 ms when you need it (hardware-dependent; see Performance).
 
 ```python
 from framegate import Gate
@@ -238,7 +238,7 @@ one opinionated ROI policy:
   graphic-vs-photographic prior: graphics/documents skew flat+edge with high orientedness,
   natural photos skew structured with low orientedness.
 
-All three are `(G×G)` (`G = 2**grid_exp`, default 32) at thumbnail scale; multiply cell
+All three are `(G×G)` (`G = 2**grid_exp`, default 64) at thumbnail scale; multiply cell
 indices by `shape / G` to map back to source pixels. `saliency` and `text` are
 cached on the `FrameStats`, so a duplicate frame reuses them for free; `motion` is recomputed
 since it depends on the previous frame.
@@ -307,9 +307,9 @@ All tunables live in one immutable `GateConfig`. Three ways to set them:
 from framegate import Gate, GateConfig
 
 Gate()                                            # library defaults
-Gate(GateConfig(min_scene_len=6, thumb=96))       # override in code
+Gate(GateConfig(min_scene_len=6, thumb=512))      # override in code
 Gate(GateConfig.from_yaml("my_config.yaml"))      # load from a file
-Gate(GateConfig.from_yaml("my_config.yaml", thumb=96))   # file + code overrides
+Gate(GateConfig.from_yaml("my_config.yaml", thumb=512))  # file + code overrides
 ```
 
 `GateConfig` is the single source of truth for every tunable (see the dataclass for what
@@ -365,27 +365,29 @@ inert on high-motion frames; set `fast_static=False` for strict bit-exactness.
 
 ## Performance
 
-Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time)
-with the **default config** (`thumb=256`, `grid_exp=5`, a 4-level pyramid, `stride=2`).
-Absolute numbers scale with CPU clock; the *shape* is consistent across machines.
+Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time) with the
+**default config**: `thumb=1024`, `grid_exp=6` (a 64x64 finest grid), a 6-level pyramid,
+`stride=4`, `feat_threads=2`. Absolute numbers scale with CPU clock and core count; the
+*shape* is consistent across machines. `examples/benchmark.py` prints the full picture on
+your own hardware -- config sweeps, where a frame goes internally, what the lazy maps cost,
+and how `feat_threads` interacts with OpenCV's own pool.
 
-| Path                          | laptop (charged) | Linux x86 (slow box) |
-|-------------------------------|------------------|----------------------|
-| `image()` (stateless)         | ~1.4 ms          | ~3.3 ms              |
-| `frame()` (temporal)          | ~1.9 ms          | ~4.0 ms              |
-| `frame()` + all maps read     | ~2.0 ms          | ~4.2 ms              |
-| `frame()` on 50% duplicates   | ~1.4 ms          | ~2.9 ms              |
+The default targets 1080p and 4K sources. A 64x64 grid over a 1024px thumbnail puts one
+finest cell on ~30 source pixels of a 1080p frame, twice as fine as the older 256px-thumbnail
+default, and the pyramid runs 64,32,16,8,4,2 cells per dimension. That resolution is the
+point and it costs roughly 4x the older default; the old operating point is one config away:
+`GateConfig(thumb=256, stride=2, grid_exp=5, n_levels=4)`.
 
-What moves the number, from `examples/benchmark.py` (figures below are the charged laptop):
+What moves the number:
 
-- **`thumb` dominates** — it sets the pixel work and scales ~quadratically with it:
-  `thumb=64` ≈ 0.14 ms, `128` ≈ 0.57 ms, `192` ≈ 1.19 ms, `256` (default) ≈ 1.44 ms.
-  This is the first knob to reach for.
-- **Input resolution barely matters** for `image()` (everything downsizes to `thumb`
-  first): ~0.75 ms at 360p rising to only ~0.88 ms at 4K. Larger frames cost more only in
-  the resize, seen mainly in `frame()` (~0.94 ms → ~1.31 ms at 4K). No need to pre-downscale.
-- **`thumb` is the main lever** — cost is quadratic in it, since it sets the pixel count
-  actually walked: 64 ≈ 0.21 ms, 128 ≈ 0.36 ms, 192 ≈ 0.56 ms, 256 (default) ≈ 0.83 ms.
+- **`thumb` dominates** — it sets the pixel work and scales ~quadratically with it. First
+  knob to reach for. It also sets the thumbnailing cost, which is proportional to *output*
+  pixels rather than input, so a 4K source costs the same to thumbnail as a 720p one.
+- **Input resolution barely matters** for `image()`: everything is resized to `thumb` first,
+  so there is no need to pre-downscale.
+- **`feat_threads` is the main parallel lever.** imfeat splits its accumulate pass into
+  disjoint bands of cell rows and the output is bit-identical at any thread count. 2 is a
+  reasonable default when other work shares the machine, 4 when it does not.
 - **`stride` is the second lever:** `stride=1` ≈ 1.68 ms, `2` (default) ≈ 0.95 ms,
   `3` ≈ 0.75 ms, `4` ≈ 0.66 ms. It simply subsamples which pixels the single accumulation
   loop visits; the gradient stencil and the cell boundaries stay at full resolution, and
@@ -393,6 +395,12 @@ What moves the number, from `examples/benchmark.py` (figures below are the charg
   binding constraint is `cell_px / stride >= 4` — at the default (`thumb=256`, `grid_exp=5`
   → 8 px cells) that caps you at `stride=2`. Past that the structure maps degrade fast
   (at 4 samples/cell the edge-energy map correlates only ~0.82 with the exact one).
+
+`stride`, `thumb` and `grid_exp` interact: what `stride` costs is samples per cell, so the
+binding constraint is `cell_px / stride >= 4` where `cell_px = thumb / 2**grid_exp`.
+`cfg.samples_per_cell` reports it, and `GateConfig` refuses outright any configuration where
+the stride steps over whole cells and leaves them with no samples at all. The default sits
+exactly on the floor of 4.
 - **`n_levels` (pyramid depth) is nearly free:** `1` ≈ 0.79 ms → `4` ≈ 0.83 ms. Coarse
   levels are exact *sums* of the finer cells' accumulators, so depth costs no extra pass
   and no extra per-pixel work — only the (tiny) reduction over cells. Ask for all of them.

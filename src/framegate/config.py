@@ -3,9 +3,9 @@
 All tunables live in one immutable dataclass -- the single source of truth. Build one:
 
     GateConfig()                                  # library defaults
-    GateConfig(min_scene_len=6, thumb=96)         # override in code
+    GateConfig(min_scene_len=6, thumb=512)        # override in code
     GateConfig.from_yaml("my.yaml")               # load from a file
-    GateConfig.from_yaml("my.yaml", thumb=96)     # file + code overrides
+    GateConfig.from_yaml("my.yaml", thumb=512)    # file + code overrides
     GateConfig.from_yaml()                        # = library defaults (reads no file)
 
 There is no shipped YAML to drift from the dataclass: ``from_yaml()`` with no path just
@@ -25,11 +25,11 @@ def _yaml_val(v):
 @dataclass(frozen=True)
 class GateConfig:
     # --- frame extraction ---
-    thumb: int = 256  # thumbnail side for stats
-    stride: int = 2  # grid stride; >1 = indexed-gather over a subsample
+    thumb: int = 1024  # thumbnail side for stats
+    stride: int = 4  # grid stride; >1 = indexed-gather over a subsample
     feat_threads: int = 2  # imfeat worker threads; output is bit-identical at any count
-    grid_exp: int = 5  # 2^grid_exp cells/dim (5 -> 32x32); output/finest level
-    n_levels: int = 4  # dyadic pyramid levels from grid_exp (5,4,3,2 -> 32..4)
+    grid_exp: int = 6  # 2^grid_exp cells/dim (6 -> 64x64); output/finest level
+    n_levels: int = 6  # dyadic pyramid levels from grid_exp (6..1 -> 64..2)
     solid_thresh: float = 1.0  # blank if max V cell-variance < this
     edge_thresh: float = 1000.0  # ...or if max cell edge-energy < this
 
@@ -96,6 +96,15 @@ class GateConfig:
         return 2**self.grid_exp
 
     @property
+    def samples_per_cell(self) -> int:
+        """Sampled pixels per finest cell, per dimension. Below 1 the stride steps clean
+        over whole cells and some end up with no samples at all -- imfeat reports a count
+        of 0 there and every derived feature is meaningless. Four is the practical floor
+        for the moment and histogram features to carry information; the default sits
+        exactly on it."""
+        return (self.thumb // self.grid_size) // self.stride
+
+    @property
     def pyramid_exps(self) -> list:
         """Per-level cell-exponents, finest->coarsest: [grid_exp .. grid_exp-n_levels].
         Level 0 is the finest (output) grid; coarser levels feed multi-scale signals.
@@ -104,6 +113,12 @@ class GateConfig:
         if exps[-1] < 0:
             raise ValueError(
                 f"n_levels={self.n_levels} too deep for grid_exp={self.grid_exp}"
+            )
+        if self.samples_per_cell < 1:
+            raise ValueError(
+                f"thumb={self.thumb} over a {self.grid_size}x{self.grid_size} grid gives "
+                f"{self.thumb // self.grid_size}px cells, which stride={self.stride} steps "
+                f"over entirely -- some cells would get no samples"
             )
         return exps
 

@@ -12,6 +12,11 @@ from framegate import Gate, GateConfig
 G = GateConfig().grid_size
 
 
+# See the note in test_robustness.py: this asserts pattern-to-cell geometry on 128px
+# fixtures, so it pins the fixture-scale config rather than the 1080p-targeted default.
+FIXTURE_CFG = GateConfig(thumb=256, stride=2, grid_exp=5, n_levels=4)
+
+
 def test_structure_maps_shapes_and_ranges():
     fs = Gate().image(synth.checkerboard(cell=4))
     for m in (fs.edge_energy, fs.coherence, fs.cornerness, fs.orientation):
@@ -81,7 +86,7 @@ def test_focus_decreases_monotonically_with_blur():
 
 
 def test_structure_type_soft_labels():
-    g = Gate()
+    g = Gate(FIXTURE_CFG)
     edge = np.full((256, 256, 3), 40, np.uint8)
     edge[:, 128:] = 210
     for img in (synth.solid(128), edge, synth.checkerboard(cell=4), synth.foliage()):
