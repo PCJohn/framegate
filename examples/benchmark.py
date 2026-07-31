@@ -4,6 +4,18 @@ code lives in the library itself.
     python examples/benchmark.py             # synthetic sweep (sizes / grids / strides)
     python examples/benchmark.py video.mp4   # measure on a real video
 
+Sections [1] and [6]-[10] sweep whole-call latency across configs. [2]-[5] break a
+frame open: where the time goes inside one, what the lazy maps cost, and how imfeat's
+worker pool and OpenCV's interact.
+
+[2] and [3] measure things the sweeps cannot see. [2] is cumulative -- each row is a
+real measurement including everything above it, so the deltas are differences of
+measurements rather than of separately-minimised timings. It reads private attributes
+and prints a skip line if they move. [3] exists because FrameStats properties are lazy:
+frame() builds the object without evaluating a single map, so every other number here
+excludes them. Its rows are timed on an uncached FrameStats, so shared intermediates are
+paid for by whichever property is measured first -- read the ranking, not the sum.
+
 Methodology: minimum over repeats with the GC disabled, and sweep configs are
 *interleaved* (round-robin one pass each per round) so thermal/clock drift over the
 run is spread evenly across configs rather than penalizing whichever ran during a
@@ -90,8 +102,10 @@ def _print(label, mn_md):
     print(f"  {label:36s} {mn:6.3f} / {md:6.3f} ms   {1000 / mn:6.0f} fps")
 
 
-def _header(title):
-    print(f"\n{title}\n  {'config':36s} {'min / median':>14s}   {'(from min)':>10s}")
+def _header(title, cols=True):
+    print(f"\n{title}")
+    if cols:
+        print(f"  {'config':36s} {'min / median':>14s}   {'(from min)':>10s}")
 
 
 def _cfg_items(specs, frames):
@@ -105,6 +119,89 @@ def _cfg_items(specs, frames):
             continue
         items.append((label, (lambda gg: lambda f: gg.image(f))(g), frames))
     return items
+
+
+def _phases(cfg, frames):
+    """Cumulative nested timings, so each row is a real measurement and the deltas are
+    differences of measurements rather than of separately-minimised sweeps. Reaches into
+    private attributes; returns None if the internals have moved."""
+    g = Gate(cfg)
+    try:
+        fg = g._gate
+        fc, keep = fg._feat, fg.cfg.return_frames
+        hsv = fg._to_hsv(frames[0], keep)[0]
+        view = fc._view(hsv)
+    except AttributeError:
+        return None
+    gf = Gate(cfg)
+    return _bench_group(
+        [
+            ("thumb", lambda f: fg._to_hsv(f, keep), frames),
+            (
+                "+ imfeat core",
+                lambda f: (fg._to_hsv(f, keep), fc._impl.features(view)),
+                frames,
+            ),
+            (
+                "+ python wrap",
+                lambda f: (fg._to_hsv(f, keep), fc.features(hsv)),
+                frames,
+            ),
+            ("+ temporal", lambda f: gf.frame(f), frames),
+        ]
+    )
+
+
+MAP_PROPS = (
+    "saliency",
+    "text",
+    "focus",
+    "structure_type",
+    "detail",
+    "flat_fraction",
+    "noise_floor",
+    "edge_energy",
+    "coherence",
+    "cornerness",
+    "motion",
+    "grid_V",
+    "exposure",
+    "contrast",
+    "colorfulness",
+    "sharpness",
+    "orientedness",
+    "dominant_orientation",
+    "clipping",
+    "blank",
+)
+
+
+def _map_costs(frames, warmup=6, repeats=25):
+    """Per-property cost on an *uncached* FrameStats. frame() evaluates none of these --
+    they are lazy -- so nothing else in this file measures them."""
+    g = Gate()
+    for f in frames[:warmup]:
+        g.frame(f)
+    out = {}
+    gc.disable()
+    try:
+        for name in MAP_PROPS:
+            best = None
+            for i in range(repeats):
+                fs, _ = g.frame(frames[i % len(frames)])
+                t = time.perf_counter()
+                try:
+                    getattr(fs, name)
+                except (AttributeError, ValueError, TypeError):
+                    best = None  # property gone or not available on this frame
+                    break
+                d = time.perf_counter() - t
+                best = d if best is None else min(best, d)
+            if best is not None:
+                out[name] = best * 1e3
+    finally:
+        gc.enable()
+    return out
 
 
 RESOLUTIONS = [
@@ -146,7 +243,62 @@ def run_synthetic():
     ]:
         _print(label, res[label])
 
-    _header("[2] input-size sweep (default config: grid 32, 4-level pyramid, stride 2)")
+    _header("[2] where a 1080p frame goes (cumulative; deltas are between rows)", False)
+    ph = _phases(GateConfig(), frames)
+    if ph is None:
+        print("  (skipped: framegate internals have moved)")
+    else:
+        prev = 0.0
+        for label in ("thumb", "+ imfeat core", "+ python wrap", "+ temporal"):
+            mn = ph[label][0]
+            print(
+                f"  {label:36s} {mn:6.3f} / {ph[label][1]:6.3f} ms   delta {mn - prev:+6.3f}"
+            )
+            prev = mn
+
+    _header("[3] lazy map cost (frame() evaluates none of these)", False)
+    mc = _map_costs(frames)
+    tot = sum(mc.values())
+    for name, v in sorted(mc.items(), key=lambda kv: -kv[1])[:8]:
+        bar = "#" * max(1, round(30 * v / max(mc.values())))
+        print(f"  {name:36s} {v:6.3f} ms        {100 * v / tot:4.1f}%  {bar}")
+    top = dict(sorted(mc.items(), key=lambda kv: -kv[1])[:8])
+    rest = sum(v for n, v in mc.items() if n not in top)
+    print(
+        f"  {f'({len(mc) - len(top)} others)':36s} {rest:6.3f} ms        {100 * rest / tot:4.1f}%"
+    )
+    print(f"  {'sum -- double-counts shared work':36s} {tot:6.3f} ms")
+
+    _header("[4] feat_threads sweep (1080p) -- imfeat worker threads")
+    res = _bench_group(
+        _cfg_items(
+            [(f"feat_threads={n}", GateConfig(feat_threads=n)) for n in (1, 2, 3, 4)],
+            frames,
+        )
+    )
+    for label in res:
+        _print(label, res[label])
+
+    _header("[5] cv2 threads x feat_threads (1080p) -- pool contention", False)
+    dflt = cv2.getNumThreads()
+    hdr = "cv2 / feat"
+    print(f"  {hdr:36s}" + "".join(f"{n:>10d}" for n in (1, 2, 4)))
+    try:
+        for nc in dict.fromkeys((1, 2, 4, dflt)):
+            cv2.setNumThreads(nc)
+            row = _bench_group(
+                _cfg_items(
+                    [(f"f{n}", GateConfig(feat_threads=n)) for n in (1, 2, 4)], frames
+                )
+            )
+            tag = f"{nc}" + (" (default)" if nc == dflt else "")
+            print(
+                f"  {tag:36s}" + "".join(f"{row[f'f{n}'][0]:10.3f}" for n in (1, 2, 4))
+            )
+    finally:
+        cv2.setNumThreads(dflt)
+
+    _header("[6] input-size sweep (default config: grid 32, 4-level pyramid, stride 2)")
     # measured per-resolution (frames freed between) so 4K doesn't blow up memory; the
     # cross-resolution signal is large, so sequential measurement is fine here
     for name, h, w in RESOLUTIONS:
@@ -166,7 +318,7 @@ def run_synthetic():
         del fr
 
     _header(
-        "[3] grid-size sweep (1080p, default stride 2)  -- grid = 2**grid_exp cells/dim"
+        "[7] grid-size sweep (1080p, default stride 2)  -- grid = 2**grid_exp cells/dim"
     )
     res = _bench_group(
         _cfg_items(
@@ -180,7 +332,7 @@ def run_synthetic():
     for label in res:
         _print(label, res[label])
 
-    _header("[4] stride sweep (1080p, grid 32)  -- imfeat pixel subsampling")
+    _header("[8] stride sweep (1080p, grid 32)  -- imfeat pixel subsampling")
     res = _bench_group(
         _cfg_items(
             [(f"stride={st}", GateConfig(stride=st)) for st in (1, 2, 3, 4)], frames
@@ -189,7 +341,7 @@ def run_synthetic():
     for label in res:
         _print(label, res[label])
 
-    _header("[5] thumb-size sweep (1080p, grid 32, default stride 2)")
+    _header("[9] thumb-size sweep (1080p, grid 32, default stride 2)")
     res = _bench_group(
         _cfg_items(
             [(f"thumb={tb}", GateConfig(thumb=tb)) for tb in (64, 96, 128, 192, 256)],
@@ -200,7 +352,7 @@ def run_synthetic():
         _print(label, res[label])
 
     _header(
-        "[6] pyramid-depth sweep (1080p, grid 32, stride 2)  -- n_levels = grids per pass"
+        "[10] pyramid-depth sweep (1080p, grid 32, stride 2)  -- n_levels = grids per pass"
     )
     res = _bench_group(
         _cfg_items(
@@ -236,6 +388,26 @@ def run_video(path):
         "frame()  + all maps read",
     ]:
         _print(label, res[label])
+
+    _header("where a frame goes (cumulative; deltas are between rows)", False)
+    ph = _phases(GateConfig(), frames)
+    if ph is None:
+        print("  (skipped: framegate internals have moved)")
+    else:
+        prev = 0.0
+        for label in ("thumb", "+ imfeat core", "+ python wrap", "+ temporal"):
+            mn = ph[label][0]
+            print(
+                f"  {label:36s} {mn:6.3f} / {ph[label][1]:6.3f} ms   delta {mn - prev:+6.3f}"
+            )
+            prev = mn
+
+    _header("lazy map cost on this content", False)
+    mc = _map_costs(frames)
+    tot = sum(mc.values())
+    for name, v in sorted(mc.items(), key=lambda kv: -kv[1])[:8]:
+        print(f"  {name:36s} {v:6.3f} ms        {100 * v / tot:4.1f}%")
+    print(f"  {'sum -- double-counts shared work':36s} {tot:6.3f} ms")
 
 
 if __name__ == "__main__":
