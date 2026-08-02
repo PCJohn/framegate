@@ -1,4 +1,4 @@
-"""ShotProfile / ShotScorer in isolation: exactness against the naive float model,
+"""ShotProfile / ShotScorer / Background in isolation: exactness against the naive float model,
 the loose-match behaviour the design exists for, and the per-frame / per-cut latency
 budget. No vision pipeline, no framestore -- just the scoring core."""
 
@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 
-from framegate.reid import BITS, ShotProfile, ShotScorer, _unpack
+from framegate.reid import BITS, Background, ShotProfile, ShotScorer, _unpack
 
 rng = np.random.default_rng(0)
 
@@ -22,11 +22,11 @@ def profile(frames):
     return p.finalize()
 
 
-def naive_mean_ll(q, counts, n):
+def naive_ll(q, counts, n):
     """The definition, computed the slow obvious way, as an oracle."""
     p = (counts + 0.5) / (n + 1.0)
     qb = _unpack(np.array([q], np.uint64))[0]
-    return float(np.where(qb == 1, np.log(p), np.log(1.0 - p)).mean())
+    return float(np.where(qb == 1, np.log(p), np.log(1.0 - p)).sum())
 
 
 def test_scorer_matches_naive_float_model_exactly():
@@ -36,7 +36,7 @@ def test_scorer_matches_naive_float_model_exactly():
         frames = rint(n)
         p = profile(frames)
         q = int(rint())
-        assert abs(sc.score(q, [p])[0] - naive_mean_ll(q, p.counts, p.n)) < 1e-9
+        assert abs(sc.score(q, [p])[0] - naive_ll(q, p.counts, p.n)) < 1e-9
 
 
 def test_counts_are_correct_and_finalize_is_idempotent():
@@ -67,8 +67,8 @@ def test_identical_frames_give_confident_bits():
     h = int(rint())
     p = profile(np.full(40, h, np.uint64))
     sc = ShotScorer()
-    assert sc.score(h, [p])[0] > -0.05
-    assert sc.score(h ^ ((1 << 64) - 1), [p])[0] < -2.0
+    assert sc.score(h, [p])[0] > -3.2  # nats over 64 bits
+    assert sc.score(h ^ ((1 << 64) - 1), [p])[0] < -128.0
 
 
 def test_within_shot_flicker_bits_do_not_penalise_a_rematch():
@@ -93,9 +93,9 @@ def test_within_shot_flicker_bits_do_not_penalise_a_rematch():
     off = rng.choice(stable, 18, replace=False)
     diff = sc.score(base ^ sum(1 << int(b) for b in off), [p])[0]  # different setup
 
-    assert same > -0.2  # comfortably matches
-    assert diff < -1.0  # clearly rejected
-    assert same - diff > 0.8  # wide separation to place a threshold in
+    assert same > -12.8  # comfortably matches (nats over 64 bits)
+    assert diff < -64.0  # clearly rejected
+    assert same - diff > 51.2  # wide separation to place a threshold in
 
 
 def test_scorer_ranks_and_batches_consistently():
@@ -174,7 +174,7 @@ def test_fold_invalidates_cached_logs():
     assert np.allclose(p.log1, profile(np.concatenate([a, b])).log1)
 
 
-def _accept_radius(h, n, eps, thresh=-0.28):
+def _accept_radius(h, n, eps, thresh=-17.92):
     """Largest number of flipped bits a stable n-frame profile still accepts."""
     p = ShotProfile(h, eps)
     for _ in range(n):
@@ -191,3 +191,75 @@ def test_eps_makes_the_accept_radius_length_independent():
     h = int(rint())
     assert _accept_radius(h, 30, 0.0) - _accept_radius(h, 1000, 0.0) >= 2  # the bug
     assert _accept_radius(h, 30, 0.02) == _accept_radius(h, 1000, 0.02)  # fixed
+
+
+# --- Background: the null the ratio is taken against --------------------------------
+
+
+def _bg(votes, eps=0.02):
+    b = Background(eps)
+    for i, (gid, prof) in enumerate(votes):
+        b.update(i, gid, prof.dist)
+    return b
+
+
+def test_empty_background_is_the_uniform_null():
+    """With no population, no bit is common, so the ratio reduces to the plain
+    likelihood against p = 1/2."""
+    b = Background(0.02)
+    assert abs(b.loglik(int(rint())) - BITS * np.log(0.5)) < 1e-9
+
+
+def test_background_votes_once_per_prototype_not_once_per_frame():
+    """A long take must not become the population: its own evidence would collapse,
+    since it would be scored against a copy of itself."""
+    h = int(rint())
+    long_p = profile(np.full(3000, h, np.uint64))  # one setup, 3000 frames
+    others = [profile(rint(60)) for _ in range(7)]
+    b = _bg([(0, long_p)] + [(i + 1, o) for i, o in enumerate(others)])
+    sc = ShotScorer()
+    llr = sc.score(h, [long_p])[0] - b.loglik(h, 0)
+    assert llr > 20.0  # the long take still re-IDs itself
+
+
+def test_shared_bits_stop_supporting_a_match():
+    """The failure this exists for: every setup in one room shares its low-frequency
+    layout, so those bits must carry no evidence."""
+    common = int(rint())
+    mask = (1 << 20) - 1  # only the low 20 bits differ between setups
+    profs = [
+        profile(np.full(60, (common & ~mask) | int(rng.integers(0, mask + 1)), np.uint64))
+        for _ in range(8)
+    ]
+    b = _bg(list(enumerate(profs)))
+    sc = ShotScorer()
+    q = profs[3].key_hash
+    ll = sc.score(q, [profs[3]])[0]
+    llr = ll - b.loglik(q, 3)  # against the population
+    flat = ll - BITS * np.log(0.5)  # against an uninformative null
+    assert llr > 5.0  # the distinctive bits still carry the match
+    assert llr < 0.6 * flat  # but the 44 shared ones no longer support it
+
+
+def test_leave_one_group_out_matters_most_when_few_groups_are_known():
+    """A group is a large fraction of its own null early on; the bias shrinks as the
+    population grows."""
+    profs = [profile(rint(60)) for _ in range(8)]
+    sc = ShotScorer()
+    gaps = []
+    for k in (2, 8):
+        b = _bg(list(enumerate(profs[:k])))
+        q = profs[1].key_hash
+        ll = sc.score(q, [profs[1]])[0]
+        gaps.append((ll - b.loglik(q, 1)) - (ll - b.loglik(q, None)))
+    assert gaps[0] > gaps[1] > 0
+
+
+def test_background_update_is_idempotent_per_prototype():
+    """A prototype that folds more frames replaces its own vote rather than adding one."""
+    profs = [profile(rint(60)) for _ in range(3)]
+    b, q = _bg(list(enumerate(profs))), int(rint())
+    before = b.loglik(q)
+    for i, pr in enumerate(profs):
+        b.update(i, i, pr.dist)
+    assert len(b) == 3 and abs(b.loglik(q) - before) < 1e-9

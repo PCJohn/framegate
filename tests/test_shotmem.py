@@ -30,14 +30,14 @@ def flip(h, nbits):
 
 
 def test_first_shot_opens_group_zero():
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     gid, is_new = m.open_shot(rint())
     assert (gid, is_new) == (0, True)
     assert len(m) == 1
 
 
 def test_distinct_hashes_make_new_groups():
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     a, b = rint(), rint()  # two random hashes are ~32 bits apart, well outside maxd
     g0, n0 = m.open_shot(a)
     g1, n1 = m.open_shot(b)
@@ -46,7 +46,7 @@ def test_distinct_hashes_make_new_groups():
 
 
 def test_near_duplicate_reids_the_same_group():
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     base = rint()
     gid, _ = m.open_shot(base)
     for _ in range(30):  # build a confident profile for the group
@@ -59,7 +59,7 @@ def test_near_duplicate_reids_the_same_group():
 def test_beyond_radius_is_never_matched():
     """A candidate outside reid_maxd is not even retrieved, so it cannot re-ID however
     the scorer would rank it."""
-    m = ShotMemory(reid_maxd=0.1, reid_ll=-1.0)  # ~6-bit radius, permissive score
+    m = ShotMemory(reid_maxd=0.1, reid_llr=-1e6)  # ~6-bit radius, permissive score
     base = rint()
     gid, _ = m.open_shot(base)
     m.finalize_group(gid)
@@ -87,7 +87,7 @@ def _run(tracker, hashes, cut_before):
 
 
 def test_tracker_counts_shots_and_reids_abab():
-    cfg = GateConfig(reid_maxd=0.25, reid_ll=-0.28)
+    cfg = GateConfig(reid_maxd=0.25, reid_llr=8.0)
     t = ShotTracker(cfg)
     A, B = rint(), rint()
     # blocks of 5 frames; cut is confirmed one frame late, so it fires on the SECOND
@@ -105,7 +105,7 @@ def test_tracker_counts_shots_and_reids_abab():
 
 
 def test_tracker_records_shot_metadata():
-    cfg = GateConfig(reid_maxd=0.25, reid_ll=-0.28)
+    cfg = GateConfig(reid_maxd=0.25, reid_llr=8.0)
     t = ShotTracker(cfg)
     A, B = rint(), rint()
     _run(t, [flip(A, 1)] * 5 + [flip(B, 1)] * 5, cut_before={6})
@@ -119,7 +119,7 @@ def test_tracker_records_shot_metadata():
 
 
 def test_group_accumulates_across_recurrences():
-    cfg = GateConfig(reid_maxd=0.25, reid_ll=-0.28)
+    cfg = GateConfig(reid_maxd=0.25, reid_llr=8.0)
     t = ShotTracker(cfg)
     A, B = rint(), rint()
     out = _run(
@@ -154,7 +154,7 @@ def _monotonic_drift(m, gid, base, n=200, order=None):
 def test_small_jitter_stays_one_prototype():
     """The common case -- a near-static shot with a few bits of frame-to-frame jitter
     (a talking head) -- must not spawn extra prototypes."""
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     base = rint()
     gid, _ = m.open_shot(base)
     for _ in range(150):
@@ -167,7 +167,7 @@ def test_drift_spawns_prototypes_and_reids_both_ends():
     """A shot that drifts far spawns local prototypes, and a later recurrence near
     either end -- the start or the drifted end -- re-identifies to the same group,
     which a single shot-wide profile could not do."""
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     base = rint()
     gid, _ = m.open_shot(base)
     end, order = _monotonic_drift(m, gid, base)
@@ -183,7 +183,7 @@ def test_drift_spawns_prototypes_and_reids_both_ends():
 def test_distinct_shots_still_separate_with_prototypes():
     """Prototypes must not over-merge: a genuinely different setup is still a new group,
     even after the first shot has spread into several prototypes."""
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     a = rint()
     ga, _ = m.open_shot(a)
     _monotonic_drift(m, ga, a)
@@ -196,7 +196,7 @@ def test_distinct_shots_still_separate_with_prototypes():
 def test_accumulate_is_nanoseconds_per_frame(capsys):
     """The per-frame drift check is the whole cost accumulate adds. It must stay a
     single popcount against the active prototype in the common (near) case."""
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     base = rint()
     gid, _ = m.open_shot(base)
     hs = [flip(base, 2) for _ in range(100_000)]  # near frames -> fast path every time
@@ -215,7 +215,7 @@ def test_hot_cache_survives_buffer_fold():
     that fires mid-shot (buffer past its bound) must clear that buffer in place, not
     replace it, or the cache would append into a discarded list and silently drop
     frames."""
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     base = rint()
     gid, _ = m.open_shot(base)
     for _ in range(9000):  # > the 4096 fold bound, so a fold fires during accumulate
@@ -232,7 +232,7 @@ def test_hot_cache_survives_buffer_fold():
 def test_cut_frame_is_not_folded_into_the_outgoing_shot():
     """The frame that opens a new shot must not contaminate the previous group's
     profile -- it is the one frame guaranteed to show a different setup."""
-    cfg = GateConfig(reid_maxd=0.25, reid_ll=-0.28)
+    cfg = GateConfig(reid_maxd=0.25, reid_llr=8.0)
     t = ShotTracker(cfg)
     A, B = rint(), rint()
     seq = [flip(A, 1) for _ in range(5)] + [flip(B, 1) for _ in range(5)]
@@ -246,7 +246,7 @@ def test_cut_frame_is_not_folded_into_the_outgoing_shot():
 def test_rematch_makes_the_matched_prototype_active():
     """After a re-ID the group's hot prototype must be the one that won the match, not
     whichever it happened to drift onto at the end of its previous occurrence."""
-    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
     base = rint()
     gid, _ = m.open_shot(base)
     _monotonic_drift(m, gid, base)

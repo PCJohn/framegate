@@ -5,11 +5,12 @@ unique `shot_id` and a `shot_group_id` shared by every recurrence of the same se
 Two stages, cheap-then-precise. A framestore index over luma pHashes gives the recall
 net: a new shot's first-frame hash retrieves candidates within a generous Hamming
 radius in microseconds. Each candidate is then scored by the per-bit Bernoulli model
-(reid.ShotScorer) -- the mean log-likelihood that the frame was drawn from that
-candidate's learned bit distribution -- and the best-scoring group above `reid_ll`
-wins. Retrieval is loose on purpose; precision comes from scoring, which is what lets
-the same setup re-ID across the pose and speech changes a talking head goes through
-(see reid.py). framestore stays a pure Hamming index; all the probability lives here.
+(reid.ShotScorer) against the null of reid.Background -- the log-likelihood *ratio*
+that the frame was drawn from that candidate rather than from the population of setups
+seen so far -- and the best-scoring group above `reid_llr` nats wins. Retrieval is loose
+on purpose; precision comes from scoring, which is what lets the same setup re-ID across
+the pose and speech changes a talking head goes through (see reid.py). framestore stays
+a pure Hamming index; all the probability lives here.
 
 A group is held as one or more *prototypes*, each a (framestore key, local Bernoulli
 profile). A near-static shot is a single prototype; a shot that drifts (a pan, a zoom)
@@ -28,7 +29,7 @@ import numpy as np
 
 import framestore  # type: ignore[import-untyped]  # framestore needs a py.typed marker
 
-from .reid import ShotProfile, ShotScorer
+from .reid import Background, ShotProfile, ShotScorer
 
 
 def _hamming(a: int, b: int) -> int:
@@ -58,6 +59,7 @@ class Prototype:
     key: int
     group_id: int
     profile: ShotProfile
+    slot: int = -1  # framestore id; also this prototype's key in the Background
 
 
 @dataclass
@@ -77,11 +79,11 @@ class ShotMemory:
     """Assigns shot group ids by loose pHash re-identification. `open_shot(hash)` at a
     cut retrieves candidate prototypes from the store, scores the query against each
     one's local Bernoulli profile, takes the best per group, and either re-IDs the best
-    group (score >= reid_ll) or creates a new one. `accumulate(gid, hash)` folds a frame
+    group (ratio >= reid_llr) or creates a new one. `accumulate(gid, hash)` folds a frame
     into the nearest prototype of its group, spawning a new prototype when the frame has
     drifted past reid_maxd from all existing ones."""
 
-    def __init__(self, reid_maxd: float, reid_ll: float, reid_eps: float = 0.0) -> None:
+    def __init__(self, reid_maxd: float, reid_llr: float, reid_eps: float = 0.0) -> None:
         self._maxd = reid_maxd
         self._eps = reid_eps
         self._maxbits = int(reid_maxd * 64)  # recall radius in bits
@@ -90,9 +92,10 @@ class ShotMemory:
         # lands in a scoring dead zone between two centres, while recall still reaches
         # anything within the full radius.
         self._spawnbits = max(1, self._maxbits // 2)
-        self._ll = reid_ll
+        self._llr = reid_llr
         self._store = framestore.Store()
         self._scorer = ShotScorer()
+        self._bg = Background(reid_eps)
         self._groups: Dict[int, Group] = {}
         self._by_slot: Dict[int, Prototype] = {}  # framestore id -> prototype
         # Per-group hot cache: the active prototype pre-unpacked into the four things
@@ -145,8 +148,8 @@ class ShotMemory:
     def _add_prototype(self, g: Group, h: int) -> Prototype:
         pr = Prototype(h, g.group_id, ShotProfile(h, self._eps))
         g.prototypes.append(pr)
-        slot = int(self._store.insert(np.array([h], np.uint64))[0])
-        self._by_slot[slot] = pr
+        pr.slot = int(self._store.insert(np.array([h], np.uint64))[0])
+        self._by_slot[pr.slot] = pr
         return pr
 
     def _match(self, q_hash: int) -> Optional[Tuple[int, "Prototype"]]:
@@ -162,15 +165,20 @@ class ShotMemory:
         if not seen:
             return None
         protos = list(seen.values())
-        scores = self._scorer.score(
+        lls = self._scorer.score(
             int(q_hash), [pr.profile.finalize() for pr in protos]
         )
+        # The null term is constant within a group, so picking a group's best prototype
+        # by raw log-likelihood and subtracting once is the same as scoring each ratio.
         best: Dict[int, Tuple[float, Prototype]] = {}
-        for pr, sc in zip(protos, scores):  # a group's score is its best prototype
-            if sc > best.get(pr.group_id, (-np.inf, pr))[0]:
-                best[pr.group_id] = (float(sc), pr)
-        gid, (sc, pr) = max(best.items(), key=lambda kv: kv[1][0])
-        return (gid, pr) if sc >= self._ll else None
+        for pr, ll in zip(protos, lls):
+            if ll > best.get(pr.group_id, (-np.inf, pr))[0]:
+                best[pr.group_id] = (float(ll), pr)
+        ratios = {
+            g: (ll - self._bg.loglik(q_hash, g), pr) for g, (ll, pr) in best.items()
+        }
+        gid, (llr, pr) = max(ratios.items(), key=lambda kv: kv[1][0])
+        return (gid, pr) if llr >= self._llr else None
 
     def _new_group(self, first_hash: int) -> int:
         gid = self._n
@@ -179,15 +187,16 @@ class ShotMemory:
         pr = Prototype(h, gid, ShotProfile(h, self._eps))
         self._groups[gid] = Group(gid, [pr])
         self._set_hot(gid, pr)
-        slot = int(self._store.insert(np.array([h], np.uint64))[0])
-        self._by_slot[slot] = pr
+        pr.slot = int(self._store.insert(np.array([h], np.uint64))[0])
+        self._by_slot[pr.slot] = pr
         return gid
 
     def finalize_group(self, gid: int) -> None:
-        """Fold every prototype of a group -- called when a shot closes so its frames
-        are counted before the next match scores against them."""
+        """Fold every prototype of a group and refresh its vote in the null -- called
+        when a shot closes, so its frames are counted before the next match scores
+        against them and the population they widen."""
         for pr in self._groups[gid].prototypes:
-            pr.profile.finalize()
+            self._bg.update(pr.slot, gid, pr.profile.dist)
 
     def prototypes(self, gid: int) -> List[Prototype]:
         return self._groups[gid].prototypes
@@ -221,7 +230,7 @@ class ShotTracker:
     def __init__(self, cfg) -> None:
         self.shot_id = 0
         self.shot_group_id = -1  # -1 until the first shot opens as group 0
-        self._mem = ShotMemory(cfg.reid_maxd, cfg.reid_ll, cfg.reid_eps)
+        self._mem = ShotMemory(cfg.reid_maxd, cfg.reid_llr, cfg.reid_eps)
         self._pending: Optional[Tuple[int, int]] = None  # (hash, frame_id) at t-1
         self._shots: List[Shot] = []
         self._start_frame = 0

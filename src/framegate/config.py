@@ -47,13 +47,16 @@ class GateConfig:
     cut_dissim: float = 0.45  # static-scene guard floor on the cut score
     # L2 shot re-ID (framestore + per-bit Bernoulli). A new shot's first-frame pHash
     # queries the store for candidate groups within reid_maxd (relative Hamming, the
-    # recall net); each candidate is then scored by the mean per-bit log-likelihood
-    # that the frame was drawn from that shot's learned bit distribution, and the best
-    # is a re-ID iff its score >= reid_ll (the precision dial). Looser than the old NCC
-    # heuristic by design: bits that vary within a shot (a moving mouth) stop
-    # penalising the match, so the same setup re-IDs across pose/speech changes.
+    # recall net); each candidate is then scored by the log-likelihood RATIO, in nats,
+    # that the frame came from that shot's learned bit distribution rather than from
+    # the population of setups seen so far, and the best is a re-ID iff that ratio
+    # >= reid_llr (the precision dial). Bits that vary within a shot (a moving mouth)
+    # stop penalising the match, and bits that every setup in the footage shares stop
+    # supporting it, so what remains is evidence that is both stable and distinctive.
+    # Scale: an agreeing informative bit is worth ~0.7 nats and a disagreeing one costs
+    # ~3.9, so reid_llr = 8 asks for roughly a dozen distinctive bits in agreement.
     reid_maxd: float = 0.25  # candidate radius: relative Hamming in [0,1]
-    reid_ll: float = -0.28  # match if mean per-bit log-likelihood >= this
+    reid_llr: float = 8.0  # match if the log-likelihood ratio (nats) >= this
     reid_eps: float = 0.02  # per-bit flip rate the model always allows for (see reid.py)
     min_scene_len: int = 6  # min frames between cuts (debounce)
     # L1 memory: a frame is frozen if it affine-matches any of the last freeze_win kept

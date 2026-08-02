@@ -73,14 +73,23 @@ each a framestore key (a luma pHash) plus a local per-bit Bernoulli profile. At 
 the new shot's first frame queries the [framestore](https://github.com/PCJohn/framestore)
 Hamming index for candidate prototypes within `reid_maxd` (relative Hamming — the recall
 net), and each is scored by its Bernoulli model: a prototype is a distribution over hash
-bits, and a frame matches if its mean per-bit log-likelihood clears `reid_ll` (the
-precision dial). Bits that vary within a shot (a moving mouth) sit near 0.5 and stop
-penalising, so the same setup re-IDs across pose and speech changes — looser, and cheaper,
-than the old NCC heuristic. Bit probabilities are first shrunk through a binary symmetric
+bits, and a frame matches if the log-likelihood **ratio** of that prototype against the
+population of setups seen so far clears `reid_llr` nats (the precision dial). Bits that
+vary within a shot (a moving mouth) sit near 0.5 and stop penalising, so the same setup
+re-IDs across pose and speech changes; bits that *every* setup in the footage shares (a
+dark surround, one bright window — the whole scene shot in one room) are explained just as
+well by the null and stop supporting it. What survives is evidence that is both stable
+within the shot and distinctive across the corpus, which is IDF arrived at rather than
+bolted on, and is the standard GMM-UBM verification score. The null (`reid.Background`)
+takes one vote per prototype, never per frame — frame-weighting would let a single long
+take become the population, and the setup it destroys first is its own — and leaves a
+group out of its own null (cohort normalisation), which matters early on when a handful
+of groups are known and a candidate is a large fraction of what it is scored against.
+Bit probabilities are first shrunk through a binary symmetric
 channel of rate `reid_eps`, which floors the per-bit log terms: unshrunk, a bit seen stable
 for `n` frames drives `log P(flip)` to `-log n`, so the number of tolerated bit flips would
-shrink as a shot lengthens and `reid_ll` would mean different things at frame 30 and frame
-3000. A near-static shot is a single prototype; one that drifts (a pan, a zoom) spawns more,
+shrink as a shot lengthens and `reid_llr` would mean different things at frame 30 and
+frame 3000. A near-static shot is a single prototype; one that drifts (a pan, a zoom) spawns more,
 so a recurrence of either end still matches. Accumulation lags the stream by one frame,
 since the cut is confirmed one frame late: a frame is folded into a profile only once the
 next frame has said which shot owns it, so the frame that opens a new shot never
@@ -467,7 +476,7 @@ framegate/
 │   ├── gate.py            # Gate facade + lossless duplicate skip
 │   ├── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
 │   ├── shotmem.py         # ShotMemory + ShotTracker: shot re-identification (L2)
-│   ├── reid.py            # per-bit Bernoulli shot model (ShotProfile, ShotScorer)
+│   ├── reid.py            # per-bit Bernoulli shot model + null (ShotProfile, ShotScorer, Background)
 │   └── longterm.py        # L3 mmap prototype-index stub
 ├── examples/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
@@ -482,7 +491,7 @@ framegate/
     ├── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
     ├── test_publish.py    # Publisher drop policy + frame_id / shot_id / shot_group_id
     ├── test_structure.py  # structure-tensor feature plumbing
-    ├── test_reid.py       # per-bit Bernoulli scorer: exactness, loose-match, latency
+    ├── test_reid.py       # Bernoulli scorer + Background: exactness, loose-match, latency
     └── test_shotmem.py    # ShotMemory + ShotTracker: group ids, recall+score, metadata, ABAB
 ```
 
