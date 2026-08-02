@@ -5,7 +5,6 @@ video the temporal layer (StreamAnalyzer) consumes a stream of FrameStats.
 
 from dataclasses import dataclass
 from functools import cached_property
-from typing import Optional
 
 import cv2
 import imfeat
@@ -33,18 +32,16 @@ class FrameStats:
     grids: (
         tuple
     ) = ()  # pyramid levels finest->coarsest, each (G_k, G_k, C, 4); grids[0] is grid
-    thumb: Optional[np.ndarray] = (
-        None  # resized input (BGR or gray), if cfg.return_frames
-    )
-    hsv: Optional[np.ndarray] = None  # its HSV, if cfg.return_frames
-    residual: Optional[np.ndarray] = (
+    thumb: np.ndarray | None = None  # resized input (BGR or gray), if cfg.return_frames
+    hsv: np.ndarray | None = None  # its HSV, if cfg.return_frames
+    residual: np.ndarray | None = (
         None  # (G,G) photometric change vs the previous frame;
     )
     #   set by StreamAnalyzer, None for a standalone image or the first/post-blank frame
-    ori_change: Optional[np.ndarray] = (
+    ori_change: np.ndarray | None = (
         None  # (G,G) ||d(edge orientation vector)|| vs prev; illumination-invariant
     )
-    struct: Optional[dict] = (
+    struct: dict | None = (
         None  # imfeat structure maps for V: "grid_0" (cells,cells,5) + "global" (5,)
     )
     phash: int = 0  # whole-frame luma pHash (imfeat), one uint64; shot-memory key
@@ -129,7 +126,7 @@ class FrameStats:
         )
 
     @property
-    def motion(self) -> Optional[np.ndarray]:
+    def motion(self) -> np.ndarray | None:
         """(G,G) motion magnitude vs the previous frame: |residual| (after removing
         global gain/bias) minus a noise floor, then structurally validated -- or None
         for a still image / first / post-blank frame. The floor is the larger of a
@@ -252,7 +249,7 @@ class FrameGate:
     parked between frames. One pool per FrameGate, so N streams mean N pools --
     budget against imfeat.cpu_count() if other real-time work shares the CPU."""
 
-    def __init__(self, cfg: Optional[GateConfig] = None):
+    def __init__(self, cfg: GateConfig | None = None):
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
         # One extractor, one pass: moments AND structure, for every channel, on the

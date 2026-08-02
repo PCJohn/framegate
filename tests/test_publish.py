@@ -2,8 +2,9 @@
 metadata (frame_id over all inputs, shot_id bumping on cuts) that a subscriber
 relies on. Driven exactly as a downstream user would."""
 
-from framegate import Packet, Publisher
 import synth
+
+from framegate import Packet, Publisher
 
 
 def test_blank_frame_is_dropped():
@@ -89,6 +90,6 @@ def test_cross_cut_reidentifies_recurring_shots():
 
 
 def test_distinct_shots_do_not_merge():
-    seq = sum((_shot(h, s) for h, s in [(60, 2), (120, 3), (30, 7), (90, 5)]), [])
+    seq = [f for h, s in [(60, 2), (120, 3), (30, 7), (90, 5)] for f in _shot(h, s)]
     groups = _per_shot_groups(seq)
     assert groups == [0, 1, 2, 3]  # four different shots -> four different groups

@@ -16,8 +16,6 @@ decode into one reused buffer in place (rare; OpenCV/imageio/decord all return
 fresh arrays) would defeat it -- pass copies or set skip_duplicates=False then.
 """
 
-from typing import Optional
-
 import numpy as np
 
 from .config import GateConfig
@@ -36,12 +34,12 @@ def _identical(a: np.ndarray, b: np.ndarray) -> bool:
 
 
 class Gate:
-    def __init__(self, cfg: Optional[GateConfig] = None):
+    def __init__(self, cfg: GateConfig | None = None):
         self.cfg = cfg or GateConfig()
         self._gate = FrameGate(self.cfg)
         self._stream = StreamAnalyzer(self.cfg)
-        self._last_frame: Optional[np.ndarray] = None
-        self._last_stats: Optional[FrameStats] = None
+        self._last_frame: np.ndarray | None = None
+        self._last_stats: FrameStats | None = None
 
     def image(self, img: np.ndarray) -> FrameStats:
         """Analyze a single image. No temporal state is touched."""

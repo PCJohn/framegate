@@ -14,8 +14,6 @@ should mmap the saved arrays and return a `FrozenStore`; the C++ side needs a
 save/mmap-load path on framestore (documented there as future work).
 """
 
-from typing import List, Optional, Tuple
-
 
 class FrozenStore:
     """Read-only pHash index over a fixed set of prototype images. Built offline,
@@ -26,9 +24,9 @@ class FrozenStore:
     def __init__(self) -> None:
         # Populated by load_prototypes: the mmap'd framestore arrays + parallel metadata.
         self._store = None
-        self._meta: List[dict] = []
+        self._meta: list[dict] = []
 
-    def query(self, phash: int, k: int = 1, max_dist: float = 0.1) -> Tuple:
+    def query(self, phash: int, k: int = 1, max_dist: float = 0.1) -> tuple:
         """Nearest prototypes to `phash`: (distances, ids) into `self._meta`."""
         raise NotImplementedError("L3 FrozenStore.query -- implement with mmap load")
 
@@ -46,7 +44,7 @@ def build_prototypes(image_dir: str, out_path: str) -> None:
     raise NotImplementedError("L3 offline builder -- implement in a later pass")
 
 
-def load_prototypes(path: str) -> Optional[FrozenStore]:
+def load_prototypes(path: str) -> FrozenStore | None:
     """Runtime: mmap a prototype index built by build_prototypes. Cheap enough to call
     at session start; returns a query-only FrozenStore."""
     raise NotImplementedError("L3 loader -- implement with framestore mmap support")

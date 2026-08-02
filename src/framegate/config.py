@@ -66,7 +66,9 @@ class GateConfig:
     reid_maxd: float = 0.25  # candidate radius: relative Hamming in [0,1]
     reid_llr: float = 8.0  # match if the posterior log-odds (nats) >= this
     reid_alpha: float = 1.0  # CRP concentration: prior weight on "a new setup"
-    reid_eps: float = 0.02  # per-bit flip rate the model always allows for (see reid.py)
+    reid_eps: float = (
+        0.02  # per-bit flip rate the model always allows for (see reid.py)
+    )
     min_scene_len: int = 6  # min frames between cuts (debounce)
     # L1 memory: a frame is frozen if it affine-matches any of the last freeze_win kept
     # frames. freeze_win=1 compares against the previous frame only (two-frame L1, the

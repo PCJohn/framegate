@@ -1,9 +1,9 @@
 """Accuracy tests. These read like a user driving the public API."""
 
 import numpy as np
+import synth
 
 from framegate import Gate, GateConfig
-import synth
 
 
 def _cuts(frames, cfg=None):
@@ -125,7 +125,7 @@ def test_duplicate_skip_is_lossless():
         g = Gate(GateConfig(skip_duplicates=skip))
         res = []
         for f in seq:
-            fs, sig = g.frame(f)
+            _, sig = g.frame(f)
             res.append(
                 (
                     sig.cut,

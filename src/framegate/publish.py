@@ -21,14 +21,14 @@ can replace `_emit` later without touching the gate or the drop policy.
             run_detector(pkt.frame, saliency=pkt.stats.saliency)
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, List, Optional
 
 import numpy as np
 
 from .config import GateConfig
 from .gate import Gate
-from .shotmem import ShotTracker
+from .shotmem import Shot, ShotTracker
 from .stats import FrameStats
 from .stream import TemporalSignals
 
@@ -51,10 +51,10 @@ class Publisher:
     frozen/duplicate frames are dropped, so downstream only ever sees frames worth
     processing. Not thread-safe -- use one Publisher per stream."""
 
-    def __init__(self, cfg: Optional[GateConfig] = None):
+    def __init__(self, cfg: GateConfig | None = None):
         self.cfg = cfg or GateConfig()
         self._gate = Gate(self.cfg)
-        self._subs: List[Callable[[Packet], None]] = []
+        self._subs: list[Callable[[Packet], None]] = []
         self._frame_id = -1
         self._shots = ShotTracker(self.cfg)
 
@@ -66,7 +66,7 @@ class Publisher:
         for fn in self._subs:
             fn(pkt)
 
-    def publish(self, frame: np.ndarray) -> Optional[Packet]:
+    def publish(self, frame: np.ndarray) -> Packet | None:
         """Process the next frame; return a Packet if it passes the gate, else None.
         Dropped: blank frames and freezes (which include byte/near duplicates)."""
         self._frame_id += 1
@@ -77,3 +77,12 @@ class Publisher:
         pkt = Packet(self._frame_id, shot_id, group_id, frame, stats, signals)
         self._emit(pkt)
         return pkt
+
+    def close(self) -> None:
+        """End of stream: close the final shot so it appears in `shots`. Idempotent."""
+        self._shots.close()
+
+    @property
+    def shots(self) -> list[Shot]:
+        """Closed shots so far. The one in progress appears after `close()`."""
+        return self._shots.shots

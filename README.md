@@ -63,7 +63,9 @@ byte- or near-identical duplicate surfaces as `freeze`) are dropped, so a subscr
 assume every `Packet` is worth the heavy pipeline. Read the return of `publish(frame)`
 (`None` when dropped) or register a callback via `subscribe`; the emit path is a plain
 fan-out, so a real
-transport (zmq, asyncio queue, ROS) can replace it later without touching the gate.
+transport (zmq, asyncio queue, ROS) can replace it later without touching the gate. Call
+`close()` when the stream ends so the final shot is closed and recorded — nothing else can
+know it is over.
 
 **Shot re-identification** (`shotmem.py`, `reid.py`) is what gives `shot_group_id` its
 meaning, and it's a three-layer memory. **L1** (`stream.py`) is the freeze check: a frame
@@ -71,48 +73,24 @@ is a duplicate if it affine-matches a recent kept frame, so held frames are drop
 any heavy work. **L2** is the shot store: a group is held as one or more *prototypes*,
 each a framestore key (a luma pHash) plus a local per-bit Bernoulli profile. At each cut
 the new shot's first frame queries the [framestore](https://github.com/PCJohn/framestore)
-Hamming index for candidate prototypes within `reid_maxd` (relative Hamming — the recall
-net), and each is scored by its Bernoulli model: a prototype is a distribution over hash
-bits, and a frame matches if the log-likelihood **ratio** of that prototype against the
-population of setups seen so far clears `reid_llr` nats (the precision dial). Bits that
-vary within a shot (a moving mouth) sit near 0.5 and stop penalising, so the same setup
-re-IDs across pose and speech changes; bits that *every* setup in the footage shares (a
-dark surround, one bright window — the whole scene shot in one room) are explained just as
-well by the null and stop supporting it. What survives is evidence that is both stable
-within the shot and distinctive across the corpus, which is IDF arrived at rather than
-bolted on, and is the standard GMM-UBM verification score. The null (`reid.Background`)
-takes one vote per prototype, never per frame — frame-weighting would let a single long
-take become the population, and the setup it destroys first is its own — and leaves a
-group out of its own null (cohort normalisation), which matters early on when a handful
-of groups are known and a candidate is a large fraction of what it is scored against. A
-group scores as the **mixture** over its prototypes rather than the best of them, weighted
-by the share of the group's shot openings each prototype holds — the query is a
-shot-opening frame, so frame mass would ask the wrong question, and a shot that opens on
-one framing then pans for a thousand frames puts almost all its mass somewhere it never
-opens. Taking the max instead would hand a group one independent attempt at the threshold
-per prototype, so a group that has spread over a pan would out-compete a tight one for no
-reason beyond having more shapes to try; the mixture makes it pay ~log K for them.
+Hamming index for candidates within `reid_maxd` (relative Hamming — the recall net), and
+the decision is one posterior over *which group, or a new one*, under a
+Chinese-restaurant prior:
 
-Those per-group ratios are finally turned into a posterior over *which* group, or a new
-one, under a Chinese-restaurant prior: `P(g|q) ~ n_g P(q|g)` against
-`P(new|q) ~ reid_alpha * P(q|population)`, and the winner is a re-ID iff its posterior
-log-odds clear `reid_llr`. One rule then delivers four things that would otherwise each
-need a dial: a **margin**, since a rival of comparable evidence splits the posterior and
-blocks both; **multiple-comparison scaling**, since more candidates grow the denominator
-and demand more evidence; **rich-get-richer**, since a setup that has already recurred
-five times is genuinely likelier to recur than a one-off (`n_g`); and the **null**, as
-the new-setup branch. Log-odds keep the threshold in the same nats as the bare ratio --
-a lone candidate holding one shot at `reid_alpha = 1` scores exactly its ratio -- so the
-prior only acts where there is something to weigh against.
-Bit probabilities are first shrunk through a binary symmetric
-channel of rate `reid_eps`, which floors the per-bit log terms: unshrunk, a bit seen stable
-for `n` frames drives `log P(flip)` to `-log n`, so the number of tolerated bit flips would
-shrink as a shot lengthens and `reid_llr` would mean different things at frame 30 and
-frame 3000. A near-static shot is a single prototype; one that drifts (a pan, a zoom) spawns more,
-so a recurrence of either end still matches. Accumulation lags the stream by one frame,
-since the cut is confirmed one frame late: a frame is folded into a profile only once the
-next frame has said which shot owns it, so the frame that opens a new shot never
-contaminates the outgoing one. Per-frame cost is a single popcount and a list append. **L3** (`longterm.py`) is a stub for an offline-built,
+    P(g | q)   ~  n_g * mixture over g's prototypes of P(q | prototype)
+    P(new | q) ~  reid_alpha * P(q | population of setups seen so far)
+
+re-IDing the leader iff its posterior log-odds clear `reid_llr` nats. Bits that vary
+within a shot (a moving mouth) sit near 0.5 and stop penalising, so a setup re-IDs across
+pose and speech changes; bits that *every* setup shares (a dark surround, one bright
+window — a scene shot in one room) are explained just as well by the population term and
+stop supporting it. What survives is evidence both stable within the shot and distinctive
+across the corpus. One rule then also delivers a best-vs-second-best **margin** (a
+comparable rival splits the posterior and blocks both), **multiple-comparison scaling**,
+and **rich-get-richer** (`n_g`) — each of which would otherwise want its own dial. Per
+frame the cost is a single popcount and a list append; the scoring runs only at cuts, in
+tens of microseconds. `docs/shot-reid.md` has the derivation, the constants and the known
+limitations. **L3** (`longterm.py`) is a stub for an offline-built,
 mmap-loaded prototype index (a later pass).
 
 Signals are **lazy properties**: you pay only for the ones you read. Reading
@@ -495,8 +473,10 @@ framegate/
 │   ├── gate.py            # Gate facade + lossless duplicate skip
 │   ├── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
 │   ├── shotmem.py         # ShotMemory + ShotTracker: shot re-identification (L2)
-│   ├── reid.py            # per-bit Bernoulli shot model + null (ShotProfile, ShotScorer, Background)
+│   ├── reid.py            # Bernoulli shot model + population null (ShotProfile, score, Background)
 │   └── longterm.py        # L3 mmap prototype-index stub
+├── docs/
+│   └── shot-reid.md       # re-ID decision rule, constants, known limitations
 ├── examples/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
 │   ├── shots.py           # live shot re-ID viewer: groups build up as the video plays
@@ -510,7 +490,7 @@ framegate/
     ├── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
     ├── test_publish.py    # Publisher drop policy + frame_id / shot_id / shot_group_id
     ├── test_structure.py  # structure-tensor feature plumbing
-    ├── test_reid.py       # Bernoulli scorer + Background: exactness, loose-match, latency
+    ├── test_reid.py       # Bernoulli model + Background: exactness, loose-match, latency
     └── test_shotmem.py    # ShotMemory + ShotTracker: group ids, recall+score, metadata, ABAB
 ```
 

@@ -6,7 +6,6 @@ since you can't diff a frame against content from before a hard break.
 
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -75,14 +74,14 @@ class StreamAnalyzer:
     robust (median+MAD) outlier AND an isolated peak (rejecting pans/dissolves),
     debounced by a minimum shot length, confirmed with 1 frame of latency."""
 
-    def __init__(self, cfg: Optional[GateConfig] = None):
+    def __init__(self, cfg: GateConfig | None = None):
         self.cfg = cfg or GateConfig()
-        self._prev_luma: Optional[np.ndarray] = None  # prev cell-mean luma map (G, G)
-        self._prev_color: Optional[np.ndarray] = None  # prev global colour vector (3,)
-        self._prev_ovec: Optional[np.ndarray] = (
+        self._prev_luma: np.ndarray | None = None  # prev cell-mean luma map (G, G)
+        self._prev_color: np.ndarray | None = None  # prev global colour vector (3,)
+        self._prev_ovec: np.ndarray | None = (
             None  # prev per-cell orientation vec (G,G,2)
         )
-        self._prev_V: Optional[float] = None
+        self._prev_V: float | None = None
         self._l1: deque = deque(maxlen=max(1, self.cfg.freeze_win))  # (luma, V) ring
         self._roll = _RollingRobust(self.cfg.roll_win, self.cfg.robust_min)
         self._vhist: deque = deque(maxlen=self.cfg.flicker_win)

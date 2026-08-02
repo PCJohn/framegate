@@ -2,14 +2,13 @@
 re-identification path, per-shot metadata, and the ABAB recurrence contract. Driven
 with synthetic pHashes so the logic is testable without the vision pipeline."""
 
+import time
 from types import SimpleNamespace
 
 import numpy as np
 
-import time
-
 from framegate.config import GateConfig
-from framegate.reid import _unpack
+from framegate.reid import _unpack, bits, score
 from framegate.shotmem import Group, Shot, ShotMemory, ShotTracker
 
 rng = np.random.default_rng(0)
@@ -325,8 +324,8 @@ def test_a_lone_candidate_scores_its_bare_ratio():
         m.accumulate(gid, flip(base, 1))
     m.finalize_group(gid)
     q = flip(base, 2)
-    pr = m.prototypes(gid)[0]
-    bare = m._scorer.score(q, [pr.profile.finalize()])[0] - m._bg.loglik(q, gid)
+    pr, qb = m.prototypes(gid)[0], bits(q)
+    bare = score(qb, [pr.profile])[0] - m._bg.loglik(qb, gid)
     assert abs(m._match(q)[2] - bare) < 1e-9
 
 
@@ -367,3 +366,33 @@ def test_a_group_that_keeps_recurring_is_favoured():
     m.finalize_group(gid)
     assert m._n_shots(gid) == 5
     assert abs((m._match(q)[2] - once) - np.log(5)) < 0.5
+
+
+def test_close_flushes_the_final_shot():
+    """Nothing else can know the stream has ended, so without close() the last shot
+    never reaches `shots` and its frames never fold into its group's profile."""
+    cfg = GateConfig(reid_maxd=0.25, reid_llr=8.0)
+    t = ShotTracker(cfg)
+    A, B = rint(), rint()
+    _run(t, [flip(A, 1)] * 5 + [flip(B, 1)] * 5, cut_before={6})
+    assert len(t.shots) == 1  # only the shot the cut closed
+
+    t.close()
+    last = t.shots[1]
+    assert (last.shot_id, last.start_frame, last.end_frame, last.n_frames) == (
+        1,
+        5,
+        9,
+        5,
+    )
+    t._mem.finalize_group(last.group_id)
+    assert sum(pr.profile.n for pr in t._mem.prototypes(last.group_id)) == 5
+
+    t.close()  # idempotent
+    assert len(t.shots) == 2
+
+
+def test_close_on_an_unused_tracker_is_a_no_op():
+    t = ShotTracker(GateConfig())
+    t.close()
+    assert t.shots == []

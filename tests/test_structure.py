@@ -3,6 +3,8 @@ orientation, and the global sharpness scalar. These are complementary to the
 moment-based maps -- they read gradient layout, not the intensity distribution.
 """
 
+from itertools import pairwise
+
 import cv2
 import numpy as np
 import synth
@@ -82,7 +84,7 @@ def test_focus_decreases_monotonically_with_blur():
         Gate().image(base if s == 0 else cv2.GaussianBlur(base, (0, 0), s)).focus.mean()
         for s in (0.0, 1.0, 2.0, 4.0)
     ]
-    assert all(a > b for a, b in zip(means, means[1:]))  # strictly decreasing
+    assert all(a > b for a, b in pairwise(means))  # strictly decreasing
 
 
 def test_structure_type_soft_labels():
