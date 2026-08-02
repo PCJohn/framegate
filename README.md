@@ -76,9 +76,15 @@ net), and each is scored by its Bernoulli model: a prototype is a distribution o
 bits, and a frame matches if its mean per-bit log-likelihood clears `reid_ll` (the
 precision dial). Bits that vary within a shot (a moving mouth) sit near 0.5 and stop
 penalising, so the same setup re-IDs across pose and speech changes — looser, and cheaper,
-than the old NCC heuristic. A near-static shot is a single prototype; one that drifts (a
-pan, a zoom) spawns more, so a recurrence of either end still matches. Per-frame cost is a
-single popcount and a list append. **L3** (`longterm.py`) is a stub for an offline-built,
+than the old NCC heuristic. Bit probabilities are first shrunk through a binary symmetric
+channel of rate `reid_eps`, which floors the per-bit log terms: unshrunk, a bit seen stable
+for `n` frames drives `log P(flip)` to `-log n`, so the number of tolerated bit flips would
+shrink as a shot lengthens and `reid_ll` would mean different things at frame 30 and frame
+3000. A near-static shot is a single prototype; one that drifts (a pan, a zoom) spawns more,
+so a recurrence of either end still matches. Accumulation lags the stream by one frame,
+since the cut is confirmed one frame late: a frame is folded into a profile only once the
+next frame has said which shot owns it, so the frame that opens a new shot never
+contaminates the outgoing one. Per-frame cost is a single popcount and a list append. **L3** (`longterm.py`) is a stub for an offline-built,
 mmap-loaded prototype index (a later pass).
 
 Signals are **lazy properties**: you pay only for the ones you read. Reading

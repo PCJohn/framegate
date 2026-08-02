@@ -158,3 +158,36 @@ def test_periodic_fold_matches_single_fold():
     assert incremental.n == single.n == 10000
     assert np.array_equal(incremental.counts, single.counts)
     assert np.allclose(incremental.log1, single.log1)
+
+
+def test_fold_invalidates_cached_logs():
+    """fold() moves buffered frames into the counts, so the log terms cached by an
+    earlier finalize() are stale; a later finalize() must recompute rather than
+    short-circuit on them. Only reachable on takes long enough to fold periodically."""
+    a, b = rint(50), rint(20)
+    p = profile(a)  # finalized -> logs cached
+    for f in b:
+        p.add(int(f))
+    p.fold()  # empties the buffer AND changes the counts
+    p.finalize()
+    assert p.n == 70
+    assert np.allclose(p.log1, profile(np.concatenate([a, b])).log1)
+
+
+def _accept_radius(h, n, eps, thresh=-0.28):
+    """Largest number of flipped bits a stable n-frame profile still accepts."""
+    p = ShotProfile(h, eps)
+    for _ in range(n):
+        p.add(h)
+    p.finalize()
+    sc = ShotScorer()
+    ks = [k for k in range(BITS) if sc.score(h ^ ((1 << k) - 1), [p])[0] >= thresh]
+    return max(ks)
+
+
+def test_eps_makes_the_accept_radius_length_independent():
+    """Unshrunk, log P(flip) for an always-set bit is log(0.5/(n+1)) -> -inf, so a
+    fixed threshold tolerates fewer flips the longer the shot runs. eps floors it."""
+    h = int(rint())
+    assert _accept_radius(h, 30, 0.0) - _accept_radius(h, 1000, 0.0) >= 2  # the bug
+    assert _accept_radius(h, 30, 0.02) == _accept_radius(h, 1000, 0.02)  # fixed

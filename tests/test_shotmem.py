@@ -9,6 +9,7 @@ import numpy as np
 import time
 
 from framegate.config import GateConfig
+from framegate.reid import _unpack
 from framegate.shotmem import Group, Shot, ShotMemory, ShotTracker
 
 rng = np.random.default_rng(0)
@@ -113,7 +114,7 @@ def test_tracker_records_shot_metadata():
     s = shots[0]
     assert isinstance(s, Shot)
     assert (s.shot_id, s.group_id) == (0, 0)
-    assert s.n_frames == 6  # frames fed before the one-late cut closed the shot
+    assert s.n_frames == 5  # the 5 A frames; the cut frame belongs to the next shot
     assert s.scene_graph is None  # reserved slot, unused for now
 
 
@@ -132,7 +133,7 @@ def test_group_accumulates_across_recurrences():
     assert isinstance(t._mem.group(0), Group)
     t._mem.finalize_group(0)
     total = sum(pr.profile.n for pr in t._mem.prototypes(0))
-    assert total >= 10  # first A (6) + recurrence, folded across the group's prototypes
+    assert total >= 9  # first A (5) + the recurrence, less the still-pending frame
 
 
 # --- multi-prototype drift (a shot that pans/zooms) ------------------------------
@@ -223,3 +224,34 @@ def test_hot_cache_survives_buffer_fold():
     _, _, buf, _ = m._hot[gid]
     assert buf is m.prototypes(gid)[0].profile._buf  # same object across folds
     assert sum(pr.profile.n for pr in m.prototypes(gid)) == 9000  # nothing dropped
+
+
+# --- deferred accumulation (cut is confirmed one frame late) ---------------------
+
+
+def test_cut_frame_is_not_folded_into_the_outgoing_shot():
+    """The frame that opens a new shot must not contaminate the previous group's
+    profile -- it is the one frame guaranteed to show a different setup."""
+    cfg = GateConfig(reid_maxd=0.25, reid_ll=-0.28)
+    t = ShotTracker(cfg)
+    A, B = rint(), rint()
+    seq = [flip(A, 1) for _ in range(5)] + [flip(B, 1) for _ in range(5)]
+    _run(t, seq, cut_before={6})
+    t._mem.finalize_group(0)
+    counts = sum(pr.profile.counts for pr in t._mem.prototypes(0))
+    assert np.array_equal(counts, _unpack(np.array(seq[:5], np.uint64)).sum(0))
+    assert t.shots[0].end_frame == 4  # last frame of the A block, not the cut frame
+
+
+def test_rematch_makes_the_matched_prototype_active():
+    """After a re-ID the group's hot prototype must be the one that won the match, not
+    whichever it happened to drift onto at the end of its previous occurrence."""
+    m = ShotMemory(reid_maxd=0.25, reid_ll=-0.28)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    _monotonic_drift(m, gid, base)
+    m.finalize_group(gid)
+    assert m._hot[gid][0] != base  # drifted off the first prototype
+    again, is_new = m.open_shot(base)
+    assert (again, is_new) == (gid, False)
+    assert m._hot[gid][0] == base  # resumed on the prototype that matched

@@ -8,6 +8,14 @@ Scoring a candidate frame against a shot is then the log-likelihood that its has
 drawn from that shot's per-bit Bernoullis -- so a re-ID survives exactly the changes
 the shot itself already varies over, which is the looseness we want.
 
+The Bernoullis are passed through a binary symmetric channel of flip rate `eps` before
+scoring: p -> (1 - 2*eps)*p + eps. Without it a bit seen stable n times drives
+log P(flip) to -log n, so the model asserts a bit it has watched for 1000 frames simply
+cannot flip and the accept radius shrinks without bound as a shot lengthens -- no value
+of the threshold fixes that, because the acceptance region itself is length-dependent.
+`eps` is the physical floor: the rate at which codec, resize and sensor noise flip a
+bit between two frames of the same setup.
+
 Everything on the per-frame hot path is integer: a frame is a list append, and the
 counts are integer sums. The only floats are the per-bit log-probabilities, and those
 are computed once per shot at `finalize()` -- amortised over the whole shot, so still
@@ -42,10 +50,11 @@ class ShotProfile:
     later score is a masked add with no table lookup -- the scoring hot path never
     touches the counts again."""
 
-    __slots__ = ("key_hash", "n", "counts", "log1", "log0", "_buf")
+    __slots__ = ("key_hash", "n", "counts", "log1", "log0", "eps", "_buf")
 
-    def __init__(self, first_hash: int) -> None:
+    def __init__(self, first_hash: int, eps: float = 0.0) -> None:
         self.key_hash = int(first_hash)  # first-frame hash; the framestore key
+        self.eps = float(eps)  # BSC flip rate; floors the per-bit log terms
         self.n = 0
         self.counts = np.zeros(BITS, np.int32)
         self.log1 = self.log0 = None  # log P(bit=1), log P(bit=0), set at finalize
@@ -63,13 +72,15 @@ class ShotProfile:
         """Fold buffered frames into the integer counts. Cheap and incremental; called
         both at the closing cut and periodically on a long take to bound the buffer.
         Clears the buffer in place so any bound reference to it (the hot-path cache in
-        ShotMemory) stays valid."""
+        ShotMemory) stays valid, and drops the cached log terms, which the moved counts
+        have just invalidated."""
         if self._buf:
             self.counts += (
                 _unpack(np.array(self._buf, np.uint64)).sum(0).astype(np.int32)
             )
             self.n += len(self._buf)
             self._buf.clear()
+            self.log1 = self.log0 = None
 
     def finalize(self) -> "ShotProfile":
         """Fold any buffered frames, then cache the per-bit log terms the scorer reads.
@@ -79,6 +90,7 @@ class ShotProfile:
             return self
         self.fold()
         p = (self.counts + 0.5) / (self.n + 1.0)  # Jeffreys-smoothed bit probabilities
+        p = (1.0 - 2.0 * self.eps) * p + self.eps  # BSC: keeps log p >= log eps
         self.log1 = np.log(p)
         self.log0 = np.log(1.0 - p)
         return self

@@ -54,6 +54,7 @@ class GateConfig:
     # penalising the match, so the same setup re-IDs across pose/speech changes.
     reid_maxd: float = 0.25  # candidate radius: relative Hamming in [0,1]
     reid_ll: float = -0.28  # match if mean per-bit log-likelihood >= this
+    reid_eps: float = 0.02  # per-bit flip rate the model always allows for (see reid.py)
     min_scene_len: int = 6  # min frames between cuts (debounce)
     # L1 memory: a frame is frozen if it affine-matches any of the last freeze_win kept
     # frames. freeze_win=1 compares against the previous frame only (two-frame L1, the

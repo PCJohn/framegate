@@ -81,8 +81,9 @@ class ShotMemory:
     into the nearest prototype of its group, spawning a new prototype when the frame has
     drifted past reid_maxd from all existing ones."""
 
-    def __init__(self, reid_maxd: float, reid_ll: float) -> None:
+    def __init__(self, reid_maxd: float, reid_ll: float, reid_eps: float = 0.0) -> None:
         self._maxd = reid_maxd
+        self._eps = reid_eps
         self._maxbits = int(reid_maxd * 64)  # recall radius in bits
         # A prototype's profile covers frames within `spawn` bits of its key, so a new
         # prototype spawns at half the recall radius: the clouds overlap and no frame
@@ -102,10 +103,16 @@ class ShotMemory:
 
     def open_shot(self, first_hash: int) -> Tuple[int, bool]:
         """Return (group_id, is_new) for a shot opening on `first_hash`."""
-        gid = self._match(first_hash)
-        if gid is None:
+        m = self._match(first_hash)
+        if m is None:
             return self._new_group(first_hash), True
+        gid, pr = m
+        self._set_hot(gid, pr)  # the matched prototype is the one this shot resumes on
         return gid, False
+
+    def _set_hot(self, gid: int, pr: Prototype) -> None:
+        buf = pr.profile._buf
+        self._hot[gid] = (pr.key, buf.append, buf, pr.profile)
 
     def accumulate(self, gid: int, frame_hash: int) -> None:
         """Fold a frame into the active prototype of its group. The hot path is a single
@@ -123,8 +130,7 @@ class ShotMemory:
     def _drift(self, gid: int, h: int) -> None:
         pr = self._nearest_or_new(self._groups[gid], h)
         pr.profile.add(h)
-        buf = pr.profile._buf
-        self._hot[gid] = (pr.key, buf.append, buf, pr.profile)
+        self._set_hot(gid, pr)
 
     def _nearest_or_new(self, g: Group, h: int) -> Prototype:
         best, best_d = g.prototypes[0], _hamming(h, g.prototypes[0].key)
@@ -137,13 +143,13 @@ class ShotMemory:
         return self._add_prototype(g, h)  # drifted past every prototype -> new one
 
     def _add_prototype(self, g: Group, h: int) -> Prototype:
-        pr = Prototype(h, g.group_id, ShotProfile(h))
+        pr = Prototype(h, g.group_id, ShotProfile(h, self._eps))
         g.prototypes.append(pr)
         slot = int(self._store.insert(np.array([h], np.uint64))[0])
         self._by_slot[slot] = pr
         return pr
 
-    def _match(self, q_hash: int) -> Optional[int]:
+    def _match(self, q_hash: int) -> Optional[Tuple[int, "Prototype"]]:
         if self._n == 0:
             return None
         _, ids = self._store.query(int(q_hash), k=None, max_dist=self._maxd)
@@ -159,21 +165,20 @@ class ShotMemory:
         scores = self._scorer.score(
             int(q_hash), [pr.profile.finalize() for pr in protos]
         )
-        best_by_group: Dict[int, float] = {}
+        best: Dict[int, Tuple[float, Prototype]] = {}
         for pr, sc in zip(protos, scores):  # a group's score is its best prototype
-            if sc > best_by_group.get(pr.group_id, -np.inf):
-                best_by_group[pr.group_id] = float(sc)
-        gid, sc = max(best_by_group.items(), key=lambda kv: kv[1])
-        return gid if sc >= self._ll else None
+            if sc > best.get(pr.group_id, (-np.inf, pr))[0]:
+                best[pr.group_id] = (float(sc), pr)
+        gid, (sc, pr) = max(best.items(), key=lambda kv: kv[1][0])
+        return (gid, pr) if sc >= self._ll else None
 
     def _new_group(self, first_hash: int) -> int:
         gid = self._n
         self._n += 1
         h = int(first_hash)
-        pr = Prototype(h, gid, ShotProfile(h))
+        pr = Prototype(h, gid, ShotProfile(h, self._eps))
         self._groups[gid] = Group(gid, [pr])
-        buf = pr.profile._buf
-        self._hot[gid] = (pr.key, buf.append, buf, pr.profile)
+        self._set_hot(gid, pr)
         slot = int(self._store.insert(np.array([h], np.uint64))[0])
         self._by_slot[slot] = pr
         return gid
@@ -205,38 +210,46 @@ class ShotTracker:
         if not (stats.blank or signals.freeze):
             shot_id, group_id = tracker.update(stats, signals, frame_id)
 
-    Cut is confirmed one frame late, so at a cut `_last_hash` is the new shot's first
-    frame. Every kept frame's hash is folded into its group's profile, so a group's
-    Bernoulli distribution reflects all recurrences of the setup, not just its first."""
+    Cut is confirmed one frame late, so at a cut the *pending* frame (t-1) is the new
+    shot's first. Accumulation therefore lags one frame behind the stream: a frame is
+    folded into a group's profile only once the next frame has said which shot it
+    belongs to. Otherwise every cut folds the new shot's first frame -- the one frame
+    that is guaranteed to belong to a different setup -- into the outgoing group.
+    Every kept frame's hash is folded into its group's profile, so a group's Bernoulli
+    distribution reflects all recurrences of the setup, not just its first."""
 
     def __init__(self, cfg) -> None:
         self.shot_id = 0
         self.shot_group_id = -1  # -1 until the first shot opens as group 0
-        self._mem = ShotMemory(cfg.reid_maxd, cfg.reid_ll)
-        self._last_hash: Optional[int] = None  # previous kept frame's hash (t-1)
+        self._mem = ShotMemory(cfg.reid_maxd, cfg.reid_ll, cfg.reid_eps)
+        self._pending: Optional[Tuple[int, int]] = None  # (hash, frame_id) at t-1
         self._shots: List[Shot] = []
         self._start_frame = 0
+        self._end_frame = 0
         self._n_frames = 0  # frames in the CURRENT shot (group profile.n is cumulative)
 
     def update(self, stats, signals, frame_id: int = -1) -> Tuple[int, int]:
-        h = int(stats.phash)
-        if self.shot_group_id < 0:  # first shot opens as group 0
-            self.shot_group_id, _ = self._mem.open_shot(h)
+        pend = self._pending
+        if pend is None:  # first kept frame ever opens shot 0
+            self.shot_group_id, _ = self._mem.open_shot(int(stats.phash))
             self._start_frame = frame_id
-            self._n_frames = 0
-        elif signals.cut:  # cut closes this shot and opens the next
-            self._close_shot(frame_id)
+        elif signals.cut:  # the pending frame is the new shot's first, not the old's
+            self._close_shot()
             self.shot_id += 1
-            first = self._last_hash if self._last_hash is not None else h
-            self.shot_group_id, _ = self._mem.open_shot(first)
-            self._start_frame = frame_id
-            self._n_frames = 0
-        self._mem.accumulate(self.shot_group_id, h)
-        self._n_frames += 1
-        self._last_hash = h
+            self.shot_group_id, _ = self._mem.open_shot(pend[0])
+            self._start_frame = pend[1]
+            self._absorb(pend)
+        else:
+            self._absorb(pend)
+        self._pending = (int(stats.phash), frame_id)
         return self.shot_id, self.shot_group_id
 
-    def _close_shot(self, end_frame: int) -> None:
+    def _absorb(self, pend: Tuple[int, int]) -> None:
+        self._mem.accumulate(self.shot_group_id, pend[0])
+        self._n_frames += 1
+        self._end_frame = pend[1]
+
+    def _close_shot(self) -> None:
         gid = self.shot_group_id
         self._mem.finalize_group(gid)
         self._mem.group(gid).member_shot_ids.append(self.shot_id)
@@ -245,10 +258,11 @@ class ShotTracker:
                 shot_id=self.shot_id,
                 group_id=gid,
                 start_frame=self._start_frame,
-                end_frame=end_frame,
+                end_frame=self._end_frame,
                 n_frames=self._n_frames,
             )
         )
+        self._n_frames = 0
 
     @property
     def shots(self) -> List[Shot]:
