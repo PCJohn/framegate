@@ -154,12 +154,13 @@ class StreamAnalyzer:
         c = self.cfg
         self._idx += 1
         luma, color, V = fs.v_cell_mean, fs.color_mean, fs.exposure
-        ovec = fs.struct["grid_0"][:, :, S.SE_OC : S.SE_OS + 1]
+        ovec = fs.struct_grid[:, :, S.SE_OC : S.SE_OS + 1]
 
         if fs.blank:
             self._reset()
             return TemporalSignals.none()
-        if self._prev_luma is None:
+        prev_ovec = self._prev_ovec  # set and cleared together with _prev_luma
+        if self._prev_luma is None or prev_ovec is None:
             self._reset()
             self._prev_luma, self._prev_color, self._prev_V = luma, color, V
             self._prev_ovec = ovec
@@ -171,8 +172,8 @@ class StreamAnalyzer:
         a, b, resid = self._affine(self._prev_luma, luma)  # 2-D, no ravel copies
         fs.residual = resid  # already (G,G); annotate the frame with its motion vs t-1
         fs.ori_change = np.hypot(
-            ovec[:, :, 0] - self._prev_ovec[:, :, 0],
-            ovec[:, :, 1] - self._prev_ovec[:, :, 1],
+            ovec[:, :, 0] - prev_ovec[:, :, 0],
+            ovec[:, :, 1] - prev_ovec[:, :, 1],
         )
 
         cut_score, luma_corr = self._cut_score(

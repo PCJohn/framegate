@@ -23,7 +23,29 @@ dependencies = [
 
 [project.optional-dependencies]
 viz = ["matplotlib>=3.5"]
-dev = ["pytest>=7.0", "matplotlib>=3.5"]
+dev = ["pytest>=7.0", "matplotlib>=3.5", "ruff", "black", "mypy", "types-PyYAML"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+framegate = ["py.typed"]
+
+# Quality gates. Pinned here so `ruff check .`, `black .` and `mypy .` mean the same
+# thing for everyone; all three are clean on src/ and tests/.
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+ignore = ["E501"]  # black owns line length
+
+[tool.black]
+target-version = ["py310"]
+
+[tool.mypy]
+python_version = "3.10"
+files = ["src", "tests"]
+warn_unused_ignores = true
+warn_redundant_casts = true

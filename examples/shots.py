@@ -29,8 +29,8 @@ import sys
 import threading
 
 import cv2
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 from framegate import Gate, ShotTracker
 

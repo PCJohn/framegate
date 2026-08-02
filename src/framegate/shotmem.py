@@ -219,7 +219,7 @@ class ShotMemory:
         protos = list(seen.values())
         lls = score(q, [pr.profile for pr in protos])
         by_group: dict[int, list[tuple[float, Prototype]]] = {}
-        for pr, ll in zip(protos, lls):  # mixture terms: log w_gk + log P(q | k)
+        for pr, ll in zip(protos, lls, strict=True):  # terms: log w_gk + log P(q|k)
             by_group.setdefault(pr.group_id, []).append(
                 (float(ll) + self._logw(pr), pr)
             )

@@ -17,8 +17,8 @@ import time
 from collections import deque
 
 import cv2
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 from framegate import Gate, ShotTracker
 
@@ -49,7 +49,7 @@ def tseries(ax, title, labels, colors):
     ax.tick_params(labelsize=6)
     lns = [
         ax.plot(np.zeros(HISTORY), lw=1.0, color=c, label=lab)[0]
-        for lab, c in zip(labels, colors)
+        for lab, c in zip(labels, colors, strict=True)
     ]
     if len(labels) > 1:
         ax.legend(fontsize=6, loc="upper left", ncol=len(labels), framealpha=0.4)
@@ -265,9 +265,9 @@ def run(src):
                         ax_cut.axvline(f - origin, color="red", lw=1.0, alpha=0.7)
                     )
 
-            for ln, k in zip(ln_ev, ("struct_corr", "fade", "flicker")):
+            for ln, k in zip(ln_ev, ("struct_corr", "fade", "flicker"), strict=True):
                 ln.set_ydata(hist[k])
-            for ln, k in zip(ln_lat, ("core", "maps")):
+            for ln, k in zip(ln_lat, ("core", "maps"), strict=True):
                 ln.set_ydata(hist[k])
             a_core = np.mean(list(hist["core"])[-LAT_WIN:])
             a_full = np.mean(

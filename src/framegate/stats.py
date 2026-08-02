@@ -7,14 +7,14 @@ from dataclasses import dataclass
 from functools import cached_property
 
 import cv2
-import imfeat
+import imfeat  # type: ignore[import-untyped]  # imfeat needs a py.typed marker
 import numpy as np
 
 from . import signals as S
+from .config import GateConfig
 
 _F = len(imfeat.FEATURE_NAMES)  # 38 features per channel in a pyramid map
 _C = 3  # HSV
-from .config import GateConfig
 
 
 @dataclass
@@ -104,7 +104,7 @@ class FrameStats:
     @cached_property
     def saliency(self) -> np.ndarray:
         return S.saliency_map(
-            self.grid_V, self.grid_S, self.struct["grid_0"], self.cfg.sal_surround
+            self.grid_V, self.grid_S, self.struct_grid, self.cfg.sal_surround
         )
 
     @cached_property
@@ -169,28 +169,44 @@ class FrameStats:
     # Complementary to the moment grids: these see edge/gradient layout the
     # intensity moments are blind to. All on the finest grid, so (G, G).
     @property
+    def struct_grid(self) -> np.ndarray:
+        """(G, G, 5) per-cell structure tensor. `struct` is Optional only because a
+        FrameStats can be built by hand; Gate always fills it, so the readers below go
+        through here rather than each guarding the same invariant."""
+        if self.struct is None:
+            raise ValueError("FrameStats.struct is unset -- build it via Gate.frame()")
+        return self.struct["grid_0"]
+
+    @property
+    def struct_global(self) -> np.ndarray:
+        """(5,) frame-wide structure tensor. See `struct_grid`."""
+        if self.struct is None:
+            raise ValueError("FrameStats.struct is unset -- build it via Gate.frame()")
+        return self.struct["global"]
+
+    @property
     def edge_energy(self) -> np.ndarray:
-        return self.struct["grid_0"][:, :, S.SE_ENERGY]
+        return self.struct_grid[:, :, S.SE_ENERGY]
 
     @property
     def coherence(self) -> np.ndarray:
-        return self.struct["grid_0"][:, :, S.SE_COH]  # in [0,1]; 1 = one dominant edge
+        return self.struct_grid[:, :, S.SE_COH]  # in [0,1]; 1 = one dominant edge
 
     @property
     def cornerness(self) -> np.ndarray:
-        return self.struct["grid_0"][:, :, S.SE_CORN]  # Shi-Tomasi lambda_min
+        return self.struct_grid[:, :, S.SE_CORN]  # Shi-Tomasi lambda_min
 
     @cached_property
     def orientation(self) -> np.ndarray:
         """(G,G) dominant edge orientation in radians (-pi/2, pi/2], from the
         double-angle vector; its reliability is `coherence`, kept separate."""
-        g = self.struct["grid_0"]
+        g = self.struct_grid
         return 0.5 * np.arctan2(g[:, :, S.SE_OS], g[:, :, S.SE_OC])
 
     @property
     def sharpness(self) -> float:
         """Global gradient energy (log1p) -- a scalar detail/contrast proxy."""
-        return float(np.log1p(self.struct["global"][S.SE_ENERGY]))
+        return float(np.log1p(self.struct_global[S.SE_ENERGY]))
 
     @cached_property
     def focus(self) -> np.ndarray:
@@ -221,13 +237,13 @@ class FrameStats:
     def orientedness(self) -> float:
         """Global edge anisotropy in [0,1]: 1 = the whole frame shares one dominant edge
         orientation (architecture, horizon), ~0 = isotropic (natural/busy scenes)."""
-        return float(self.struct["global"][S.SE_COH])
+        return float(self.struct_global[S.SE_COH])
 
     @property
     def dominant_orientation(self) -> float:
         """Frame-global dominant edge orientation in radians (-pi/2, pi/2]; meaningful
         only when `orientedness` is high."""
-        gv = self.struct["global"]
+        gv = self.struct_global
         return float(0.5 * np.arctan2(gv[S.SE_OS], gv[S.SE_OC]))
 
     @cached_property

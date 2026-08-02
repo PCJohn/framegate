@@ -505,6 +505,10 @@ python examples/benchmark.py                        # synthetic, or pass a video
 python examples/publish.py                          # publishing gate (synthetic, or pass a video)
 python examples/shots.py                            # live shot re-ID viewer (synthetic, or pass a video)
 pytest                                              # needs [dev]; -s prints latencies
+ruff check . && black --check . && mypy            # quality gates; all clean, all [dev]
 ```
 
-The examples and tests import `framegate` exactly as a downstream user would.
+The examples and tests import `framegate` exactly as a downstream user would. Ruff,
+black and mypy are configured in `pyproject.toml`, so those three commands mean the same
+thing everywhere; the package ships `py.typed`, so downstream type checking sees through
+it.
