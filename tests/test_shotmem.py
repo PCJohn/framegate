@@ -292,9 +292,78 @@ def test_a_reid_credits_the_prototype_it_opened_on():
     _monotonic_drift(m, gid, base)
     m.finalize_group(gid)
     spawned = [p for p in m.prototypes(gid) if p is not first]
-    assert spawned and all(p.opens == 0 for p in spawned)  # drifted through, never opened
+    assert spawned and all(
+        p.opens == 0 for p in spawned
+    )  # drifted through, never opened
     assert m._logw(first) > m._logw(spawned[0])
 
     again, is_new = m.open_shot(flip(base, 2))
     assert (again, is_new) == (gid, False)
     assert first.opens == 2  # the recurrence opened on it again
+
+
+# --- posterior over "which group, or a new one" ----------------------------------
+
+
+def _forced(m, key, n=60):
+    """A group built without going through open_shot, so two near setups stay apart."""
+    gid = m._new_group(key)
+    for _ in range(n):
+        m.accumulate(gid, key)
+    m.finalize_group(gid)
+    return gid
+
+
+def test_a_lone_candidate_scores_its_bare_ratio():
+    """With one candidate holding one shot and alpha = 1 the prior and the competition
+    are both trivial, so the posterior log-odds reduce exactly to the likelihood ratio.
+    The extra machinery only ever acts where there is something to weigh against."""
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0, reid_alpha=1.0)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    for _ in range(60):
+        m.accumulate(gid, flip(base, 1))
+    m.finalize_group(gid)
+    q = flip(base, 2)
+    pr = m.prototypes(gid)[0]
+    bare = m._scorer.score(q, [pr.profile.finalize()])[0] - m._bg.loglik(q, gid)
+    assert abs(m._match(q)[2] - bare) < 1e-9
+
+
+def test_an_equally_good_rival_blocks_the_match():
+    """The best-vs-second-best margin, for free: a query exactly between two setups
+    splits the posterior, so neither wins -- though either alone would have."""
+    a = rint()
+    bits = [int(b) for b in rng.choice(64, 8, replace=False)]
+    b, q = a, a
+    for x in bits:
+        b ^= 1 << x
+    for x in bits[:4]:  # equidistant from a and b
+        q ^= 1 << x
+
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0, reid_alpha=1.0)
+    _forced(m, a)
+    _forced(m, b)
+    assert len(m) == 2 and m._match(q) is None
+
+    alone = ShotMemory(reid_maxd=0.25, reid_llr=8.0, reid_alpha=1.0)
+    ga = _forced(alone, a)
+    assert alone._match(q)[0] == ga  # the rival is what blocked it, not the evidence
+
+
+def test_a_group_that_keeps_recurring_is_favoured():
+    """Rich-get-richer: a setup seen five times is likelier to recur than a one-off,
+    and the bonus is exactly the CRP prior, log n."""
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0, reid_alpha=1.0)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    for _ in range(60):
+        m.accumulate(gid, flip(base, 1))
+    m.finalize_group(gid)
+    q = flip(base, 2)
+    once = m._match(q)[2]
+    for _ in range(4):
+        m.open_shot(flip(base, 1))
+    m.finalize_group(gid)
+    assert m._n_shots(gid) == 5
+    assert abs((m._match(q)[2] - once) - np.log(5)) < 0.5

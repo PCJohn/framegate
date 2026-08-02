@@ -92,6 +92,18 @@ one framing then pans for a thousand frames puts almost all its mass somewhere i
 opens. Taking the max instead would hand a group one independent attempt at the threshold
 per prototype, so a group that has spread over a pan would out-compete a tight one for no
 reason beyond having more shapes to try; the mixture makes it pay ~log K for them.
+
+Those per-group ratios are finally turned into a posterior over *which* group, or a new
+one, under a Chinese-restaurant prior: `P(g|q) ~ n_g P(q|g)` against
+`P(new|q) ~ reid_alpha * P(q|population)`, and the winner is a re-ID iff its posterior
+log-odds clear `reid_llr`. One rule then delivers four things that would otherwise each
+need a dial: a **margin**, since a rival of comparable evidence splits the posterior and
+blocks both; **multiple-comparison scaling**, since more candidates grow the denominator
+and demand more evidence; **rich-get-richer**, since a setup that has already recurred
+five times is genuinely likelier to recur than a one-off (`n_g`); and the **null**, as
+the new-setup branch. Log-odds keep the threshold in the same nats as the bare ratio --
+a lone candidate holding one shot at `reid_alpha = 1` scores exactly its ratio -- so the
+prior only acts where there is something to weigh against.
 Bit probabilities are first shrunk through a binary symmetric
 channel of rate `reid_eps`, which floors the per-bit log terms: unshrunk, a bit seen stable
 for `n` frames drives `log P(flip)` to `-log n`, so the number of tolerated bit flips would

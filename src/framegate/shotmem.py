@@ -7,7 +7,9 @@ net: a new shot's first-frame hash retrieves candidates within a generous Hammin
 radius in microseconds. Each candidate is then scored by the per-bit Bernoulli model
 (reid.ShotScorer) against the null of reid.Background -- the log-likelihood *ratio*
 that the frame was drawn from that candidate rather than from the population of setups
-seen so far -- and the best-scoring group above `reid_llr` nats wins. Retrieval is loose
+seen so far. Those ratios are then turned into a posterior over "which group, or a new
+one" under a Chinese-restaurant prior, and the winner is a re-ID iff its posterior
+log-odds clear `reid_llr` nats. Retrieval is loose
 on purpose; precision comes from scoring, which is what lets the same setup re-ID across
 the pose and speech changes a talking head goes through (see reid.py). framestore stays
 a pure Hamming index; all the probability lives here.
@@ -33,7 +35,6 @@ import numpy as np
 import framestore  # type: ignore[import-untyped]  # framestore needs a py.typed marker
 
 from .reid import Background, ShotProfile, ShotScorer
-
 
 # Pseudocount on the mixture weights. A prototype spawned by drift has never opened a
 # shot, and weight 0 would assert that a recurrence can only open where the group first
@@ -95,11 +96,17 @@ class ShotMemory:
     """Assigns shot group ids by loose pHash re-identification. `open_shot(hash)` at a
     cut retrieves candidate prototypes from the store, scores the query against each
     one's local Bernoulli profile, takes the best per group, and either re-IDs the best
-    group (mixture ratio >= reid_llr) or creates a new one. `accumulate(gid, hash)` folds a frame
+    group (posterior log-odds >= reid_llr) or creates a new one. `accumulate(gid, hash)` folds a frame
     into the nearest prototype of its group, spawning a new prototype when the frame has
     drifted past reid_maxd from all existing ones."""
 
-    def __init__(self, reid_maxd: float, reid_llr: float, reid_eps: float = 0.0) -> None:
+    def __init__(
+        self,
+        reid_maxd: float,
+        reid_llr: float,
+        reid_eps: float = 0.0,
+        reid_alpha: float = 1.0,
+    ) -> None:
         self._maxd = reid_maxd
         self._eps = reid_eps
         self._maxbits = int(reid_maxd * 64)  # recall radius in bits
@@ -112,6 +119,7 @@ class ShotMemory:
         self._store = framestore.Store()
         self._scorer = ShotScorer()
         self._bg = Background(reid_eps)
+        self._logalpha = float(np.log(reid_alpha))
         self._groups: Dict[int, Group] = {}
         self._by_slot: Dict[int, Prototype] = {}  # framestore id -> prototype
         # Per-group hot cache: the active prototype pre-unpacked into the four things
@@ -184,9 +192,7 @@ class ShotMemory:
         if not seen:
             return None
         protos = list(seen.values())
-        lls = self._scorer.score(
-            int(q_hash), [pr.profile.finalize() for pr in protos]
-        )
+        lls = self._scorer.score(int(q_hash), [pr.profile.finalize() for pr in protos])
         cand: Dict[int, List[Tuple[float, Prototype]]] = {}
         for pr, ll in zip(protos, lls):  # mixture terms: log w_k + log P(q | k)
             cand.setdefault(pr.group_id, []).append((float(ll) + self._logw(pr), pr))
@@ -194,15 +200,38 @@ class ShotMemory:
         # not return are correctly absent rather than silently reweighted, and a group
         # spread over many pays the log K it owes. The null is constant within a group,
         # so it comes off the mixture once.
-        best_gid, best_llr, best_pr = -1, -np.inf, protos[0]
+        gids, best, logits = [], [], []
         for gid, terms in cand.items():
-            llr = _logsumexp(np.array([t[0] for t in terms])) - self._bg.loglik(
-                q_hash, gid
+            gids.append(gid)
+            best.append(max(terms, key=lambda t: t[0])[1])
+            logits.append(
+                np.log(self._n_shots(gid)) + _logsumexp(np.array([t[0] for t in terms]))
             )
-            if llr > best_llr:
-                best_gid, best_llr = gid, llr
-                best_pr = max(terms, key=lambda t: t[0])[1]
-        return (best_gid, best_pr, best_llr) if best_llr >= self._llr else None
+
+        # Posterior over "which group, or a new one" under a Chinese-restaurant prior:
+        #   P(g|q) ~ n_g P(q|g),   P(new|q) ~ alpha P(q|population).
+        # The prior normaliser cancels, and groups retrieval did not return have
+        # P(q|.) ~ 0, so the competition is over the candidates. Note the background
+        # appears exactly ONCE, in the new-setup branch. Dividing every term by its own
+        # leave-one-out null instead would make the terms incommensurable and count a
+        # rival twice -- once inside the candidate's null and again as a competitor --
+        # which on an exactly ambiguous query inflates the winner rather than blocking
+        # it. Competition belongs in the denominator; the null belongs to "new".
+        arr = np.array(logits)
+        i = int(arr.argmax())
+        rest = _logsumexp(
+            np.append(
+                np.delete(arr, i), self._logalpha + self._bg.loglik(q_hash, gids[i])
+            )
+        )
+        odds = float(arr[i] - rest)
+        return (gids[i], best[i], odds) if odds >= self._llr else None
+
+    def _n_shots(self, gid: int) -> int:
+        """Shots this group has held. Every shot opening lands on exactly one prototype
+        and increments its `opens`, so the group's total is their sum -- no separate
+        counter to keep consistent."""
+        return max(1, sum(pr.opens for pr in self._groups[gid].prototypes))
 
     def _logw(self, pr: Prototype) -> float:
         """Log mixture weight of a prototype: the share of its group's shot openings
@@ -264,7 +293,9 @@ class ShotTracker:
     def __init__(self, cfg) -> None:
         self.shot_id = 0
         self.shot_group_id = -1  # -1 until the first shot opens as group 0
-        self._mem = ShotMemory(cfg.reid_maxd, cfg.reid_llr, cfg.reid_eps)
+        self._mem = ShotMemory(
+            cfg.reid_maxd, cfg.reid_llr, cfg.reid_eps, cfg.reid_alpha
+        )
         self._pending: Optional[Tuple[int, int]] = None  # (hash, frame_id) at t-1
         self._shots: List[Shot] = []
         self._start_frame = 0

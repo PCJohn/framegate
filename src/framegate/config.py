@@ -52,13 +52,20 @@ class GateConfig:
     # the population of setups seen so far. A group scores as the MIXTURE over its
     # prototypes (weighted by the share of the group's shot openings each holds), so a
     # group spread over a pan pays ~log K rather than getting K attempts at the bar;
-    # the best group is a re-ID iff that ratio >= reid_llr (the precision dial). Bits that vary within a shot (a moving mouth)
+    # those ratios become a posterior over "which group, or a new one" under a
+    # Chinese-restaurant prior of concentration reid_alpha, and the winner is a re-ID
+    # iff its posterior log-odds >= reid_llr (the precision dial). Log-odds are in the
+    # same nats as the bare ratio and a lone candidate with one shot at reid_alpha = 1
+    # scores exactly its ratio, so the prior only acts where there is something to weigh
+    # against: a close rival splits the posterior and blocks both, more known groups
+    # raise the bar, and a setup that has already recurred is likelier to recur again. Bits that vary within a shot (a moving mouth)
     # stop penalising the match, and bits that every setup in the footage shares stop
     # supporting it, so what remains is evidence that is both stable and distinctive.
     # Scale: an agreeing informative bit is worth ~0.7 nats and a disagreeing one costs
     # ~3.9, so reid_llr = 8 asks for roughly a dozen distinctive bits in agreement.
     reid_maxd: float = 0.25  # candidate radius: relative Hamming in [0,1]
-    reid_llr: float = 8.0  # match if the log-likelihood ratio (nats) >= this
+    reid_llr: float = 8.0  # match if the posterior log-odds (nats) >= this
+    reid_alpha: float = 1.0  # CRP concentration: prior weight on "a new setup"
     reid_eps: float = 0.02  # per-bit flip rate the model always allows for (see reid.py)
     min_scene_len: int = 6  # min frames between cuts (debounce)
     # L1 memory: a frame is frozen if it affine-matches any of the last freeze_win kept
