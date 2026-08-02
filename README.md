@@ -84,7 +84,14 @@ bolted on, and is the standard GMM-UBM verification score. The null (`reid.Backg
 takes one vote per prototype, never per frame — frame-weighting would let a single long
 take become the population, and the setup it destroys first is its own — and leaves a
 group out of its own null (cohort normalisation), which matters early on when a handful
-of groups are known and a candidate is a large fraction of what it is scored against.
+of groups are known and a candidate is a large fraction of what it is scored against. A
+group scores as the **mixture** over its prototypes rather than the best of them, weighted
+by the share of the group's shot openings each prototype holds — the query is a
+shot-opening frame, so frame mass would ask the wrong question, and a shot that opens on
+one framing then pans for a thousand frames puts almost all its mass somewhere it never
+opens. Taking the max instead would hand a group one independent attempt at the threshold
+per prototype, so a group that has spread over a pan would out-compete a tight one for no
+reason beyond having more shapes to try; the mixture makes it pay ~log K for them.
 Bit probabilities are first shrunk through a binary symmetric
 channel of rate `reid_eps`, which floors the per-bit log terms: unshrunk, a bit seen stable
 for `n` frames drives `log P(flip)` to `-log n`, so the number of tolerated bit flips would

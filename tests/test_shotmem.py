@@ -255,3 +255,46 @@ def test_rematch_makes_the_matched_prototype_active():
     again, is_new = m.open_shot(base)
     assert (again, is_new) == (gid, False)
     assert m._hot[gid][0] == base  # resumed on the prototype that matched
+
+
+# --- a group is a mixture over its prototypes, not the best of them --------------
+
+
+def test_extra_prototypes_cost_a_group_evidence():
+    """Taking the max gives a group one independent attempt at the threshold per
+    prototype, so a group spread over a pan out-competes a tight one for no reason
+    beyond having more shapes to try. The mixture makes it pay ~log K for them."""
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    for _ in range(60):
+        m.accumulate(gid, flip(base, 1))
+    m.finalize_group(gid)
+    lone = m._match(flip(base, 2))[2]
+
+    _monotonic_drift(m, gid, base)  # the same group, now spread over a pan
+    m.finalize_group(gid)
+    spread = m._match(flip(base, 2))[2]
+
+    k = len(m.prototypes(gid))
+    assert k > 1 and spread < lone
+    assert lone - spread > 0.8 * np.log(k)
+
+
+def test_a_reid_credits_the_prototype_it_opened_on():
+    """The query is a shot-opening frame, so opening counts -- not frame mass -- are
+    what the mixture weights should track."""
+    m = ShotMemory(reid_maxd=0.25, reid_llr=8.0)
+    base = rint()
+    gid, _ = m.open_shot(base)
+    first = m.prototypes(gid)[0]
+    assert first.opens == 1  # the group opened on it
+    _monotonic_drift(m, gid, base)
+    m.finalize_group(gid)
+    spawned = [p for p in m.prototypes(gid) if p is not first]
+    assert spawned and all(p.opens == 0 for p in spawned)  # drifted through, never opened
+    assert m._logw(first) > m._logw(spawned[0])
+
+    again, is_new = m.open_shot(flip(base, 2))
+    assert (again, is_new) == (gid, False)
+    assert first.opens == 2  # the recurrence opened on it again

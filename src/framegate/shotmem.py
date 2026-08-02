@@ -15,7 +15,10 @@ a pure Hamming index; all the probability lives here.
 A group is held as one or more *prototypes*, each a (framestore key, local Bernoulli
 profile). A near-static shot is a single prototype; a shot that drifts (a pan, a zoom)
 spawns more, so both recall and scoring stay tight to the part of the shot they cover
-instead of blurring into one shot-wide average.
+instead of blurring into one shot-wide average. A group's score is the *mixture* over
+its prototypes, not the best of them: taking the max gives a group one independent
+attempt at the threshold per prototype, so a group that has spread over a long pan
+out-competes a tight one for no reason beyond having more shapes to try.
 
 `ShotMemory` owns the store, the groups and their prototypes, and drives the matching.
 `ShotTracker` drives it from the per-frame gate outputs, accumulating the current
@@ -32,8 +35,20 @@ import framestore  # type: ignore[import-untyped]  # framestore needs a py.typed
 from .reid import Background, ShotProfile, ShotScorer
 
 
+# Pseudocount on the mixture weights. A prototype spawned by drift has never opened a
+# shot, and weight 0 would assert that a recurrence can only open where the group first
+# did -- which is exactly what a shot that pans away and comes back does not do. One
+# pseudocount keeps every prototype viable while opening statistics accumulate.
+OPEN_PRIOR = 1.0
+
+
 def _hamming(a: int, b: int) -> int:
     return (a ^ b).bit_count()  # requires Python 3.10+ (see requires-python)
+
+
+def _logsumexp(x: np.ndarray) -> float:
+    m = float(x.max())
+    return m + float(np.log(np.exp(x - m).sum()))
 
 
 @dataclass
@@ -60,6 +75,7 @@ class Prototype:
     group_id: int
     profile: ShotProfile
     slot: int = -1  # framestore id; also this prototype's key in the Background
+    opens: int = 0  # shots that opened on this prototype; its mixture weight
 
 
 @dataclass
@@ -79,7 +95,7 @@ class ShotMemory:
     """Assigns shot group ids by loose pHash re-identification. `open_shot(hash)` at a
     cut retrieves candidate prototypes from the store, scores the query against each
     one's local Bernoulli profile, takes the best per group, and either re-IDs the best
-    group (ratio >= reid_llr) or creates a new one. `accumulate(gid, hash)` folds a frame
+    group (mixture ratio >= reid_llr) or creates a new one. `accumulate(gid, hash)` folds a frame
     into the nearest prototype of its group, spawning a new prototype when the frame has
     drifted past reid_maxd from all existing ones."""
 
@@ -109,7 +125,8 @@ class ShotMemory:
         m = self._match(first_hash)
         if m is None:
             return self._new_group(first_hash), True
-        gid, pr = m
+        gid, pr, _ = m
+        pr.opens += 1
         self._set_hot(gid, pr)  # the matched prototype is the one this shot resumes on
         return gid, False
 
@@ -152,7 +169,9 @@ class ShotMemory:
         self._by_slot[pr.slot] = pr
         return pr
 
-    def _match(self, q_hash: int) -> Optional[Tuple[int, "Prototype"]]:
+    def _match(self, q_hash: int) -> Optional[Tuple[int, "Prototype", float]]:
+        """Best (group, prototype, log-likelihood ratio) for `q_hash`, or None if no
+        group clears `reid_llr`."""
         if self._n == 0:
             return None
         _, ids = self._store.query(int(q_hash), k=None, max_dist=self._maxd)
@@ -168,23 +187,38 @@ class ShotMemory:
         lls = self._scorer.score(
             int(q_hash), [pr.profile.finalize() for pr in protos]
         )
-        # The null term is constant within a group, so picking a group's best prototype
-        # by raw log-likelihood and subtracting once is the same as scoring each ratio.
-        best: Dict[int, Tuple[float, Prototype]] = {}
-        for pr, ll in zip(protos, lls):
-            if ll > best.get(pr.group_id, (-np.inf, pr))[0]:
-                best[pr.group_id] = (float(ll), pr)
-        ratios = {
-            g: (ll - self._bg.loglik(q_hash, g), pr) for g, (ll, pr) in best.items()
-        }
-        gid, (llr, pr) = max(ratios.items(), key=lambda kv: kv[1][0])
-        return (gid, pr) if llr >= self._llr else None
+        cand: Dict[int, List[Tuple[float, Prototype]]] = {}
+        for pr, ll in zip(protos, lls):  # mixture terms: log w_k + log P(q | k)
+            cand.setdefault(pr.group_id, []).append((float(ll) + self._logw(pr), pr))
+        # Weights normalise over ALL of a group's prototypes, so the ones retrieval did
+        # not return are correctly absent rather than silently reweighted, and a group
+        # spread over many pays the log K it owes. The null is constant within a group,
+        # so it comes off the mixture once.
+        best_gid, best_llr, best_pr = -1, -np.inf, protos[0]
+        for gid, terms in cand.items():
+            llr = _logsumexp(np.array([t[0] for t in terms])) - self._bg.loglik(
+                q_hash, gid
+            )
+            if llr > best_llr:
+                best_gid, best_llr = gid, llr
+                best_pr = max(terms, key=lambda t: t[0])[1]
+        return (best_gid, best_pr, best_llr) if best_llr >= self._llr else None
+
+    def _logw(self, pr: Prototype) -> float:
+        """Log mixture weight of a prototype: the share of its group's shot openings
+        that landed on it. The query is a shot-opening frame, so opening counts are the
+        right statistic -- frame mass would ask instead which prototype a *random*
+        frame of the group resembles, and a shot that opens on one framing and then
+        pans for a thousand frames puts almost all its mass somewhere it never opens."""
+        g = self._groups[pr.group_id]
+        z = sum(q.opens + OPEN_PRIOR for q in g.prototypes)
+        return float(np.log((pr.opens + OPEN_PRIOR) / z))
 
     def _new_group(self, first_hash: int) -> int:
         gid = self._n
         self._n += 1
         h = int(first_hash)
-        pr = Prototype(h, gid, ShotProfile(h, self._eps))
+        pr = Prototype(h, gid, ShotProfile(h, self._eps), opens=1)
         self._groups[gid] = Group(gid, [pr])
         self._set_hot(gid, pr)
         pr.slot = int(self._store.insert(np.array([h], np.uint64))[0])

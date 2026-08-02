@@ -49,8 +49,10 @@ class GateConfig:
     # queries the store for candidate groups within reid_maxd (relative Hamming, the
     # recall net); each candidate is then scored by the log-likelihood RATIO, in nats,
     # that the frame came from that shot's learned bit distribution rather than from
-    # the population of setups seen so far, and the best is a re-ID iff that ratio
-    # >= reid_llr (the precision dial). Bits that vary within a shot (a moving mouth)
+    # the population of setups seen so far. A group scores as the MIXTURE over its
+    # prototypes (weighted by the share of the group's shot openings each holds), so a
+    # group spread over a pan pays ~log K rather than getting K attempts at the bar;
+    # the best group is a re-ID iff that ratio >= reid_llr (the precision dial). Bits that vary within a shot (a moving mouth)
     # stop penalising the match, and bits that every setup in the footage shares stop
     # supporting it, so what remains is evidence that is both stable and distinctive.
     # Scale: an agreeing informative bit is worth ~0.7 nats and a disagreeing one costs
