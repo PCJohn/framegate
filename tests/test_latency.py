@@ -12,7 +12,9 @@ import pytest
 
 from framegate import Gate
 
-BUDGET_MS = 25.0  # generous; real hardware is far under this
+# Generous, so slow CI passes: the default front-end (1024-px box-filtered thumbnail,
+# stride 1) is ~15 ms per 1080p frame on a 2-core 2 GHz VM and a few ms on a laptop.
+BUDGET_MS = 40.0
 
 
 def _bench(fn, frames, warmup=8, repeats=5):

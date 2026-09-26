@@ -48,7 +48,8 @@ ignore = ["E501"]  # black owns line length
 target-version = ["py310"]
 
 [tool.mypy]
-python_version = "3.10"
+# no python_version pin: numpy's stubs use the `type` statement, which mypy accepts only
+# when targeting 3.12+; ruff's target-version keeps the code itself 3.10-compatible
 files = ["src", "tests"]
 warn_unused_ignores = true
 warn_redundant_casts = true
