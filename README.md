@@ -103,12 +103,17 @@ only on access.
 [`imfeat`](https://github.com/PCJohn/imfeat) -- which, in that same pass and on the same
 cells, also computes the gradient structure tensor, an orientation histogram and extrema
 densities, for *every* channel. The thumbnail is divided into a
-`GxG` grid of cells (`G = 2**grid_exp`, default 32); each cell's moments summarize its
+`GxG` grid of cells (`G = 2**grid_exp`, default 64); each cell's moments summarize its
 colour and texture, and the signals are cheap combinations of them. The grid is also
 computed at several coarser resolutions in the *same* pass -- a dyadic **pyramid** of
-`n_levels` (default 4: 32 -> 16 -> 8 -> 4). Today the signals read only the finest level;
-the coarser levels are plumbing for upcoming multi-scale signals, so **set `n_levels=1`
-to skip them** (~0.5 ms cheaper) until you need them.
+`n_levels` (default 6: 64 -> 32 -> 16 -> 8 -> 4 -> 2). Today the signals read only the
+finest level; the coarser levels are plumbing for upcoming multi-scale signals, so **set
+`n_levels=1` to skip them** (~0.5 ms cheaper) until you need them.
+
+The thumbnail (`thumb=1024`, box-filtered: `resize_interp="area"`), the grid pyramid and
+the sampling stride (`stride=1`) are exactly the front-end of
+[`fastdet`](https://github.com/PCJohn/fastdet)'s text detector (`Detector.front_end_spec`),
+so the one imfeat pass the gate makes can also feed a fastdet model.
 
 ## Recommended usage
 
@@ -340,11 +345,12 @@ back to source pixels.
 
 ### Reused frames
 
-The gate already resizes the input and converts it to HSV. With `return_frames`
-(default on), it hands those back on `FrameStats.thumb` (the resized BGR — or
-single-channel grayscale — input) and `FrameStats.hsv`, both at `cfg.thumb`
-resolution, so a driver doing `read → gate → heavy_pipeline` can reuse them instead
-of recomputing. They are `None` when the flag is off.
+The gate already resizes the input (`cfg.resize_interp`, a box filter by default) and
+converts it to HSV. With `return_frames` (default on), it hands those back on
+`FrameStats.thumb` (the resized BGR — or single-channel grayscale — input) and
+`FrameStats.hsv`, both at `cfg.thumb` resolution, so a driver doing
+`read → gate → heavy_pipeline` can reuse them instead of recomputing. They are `None`
+when the flag is off.
 
 ## Output format
 
@@ -378,17 +384,22 @@ inert on high-motion frames; set `fast_static=False` for strict bit-exactness.
 ## Performance
 
 Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time) with the
-**default config**: `thumb=1024`, `grid_exp=6` (a 64x64 finest grid), a 6-level pyramid,
-`stride=4`, `feat_threads=2`. Absolute numbers scale with CPU clock and core count; the
-*shape* is consistent across machines. `examples/benchmark.py` prints the full picture on
-your own hardware -- config sweeps, where a frame goes internally, what the lazy maps cost,
-and how `feat_threads` interacts with OpenCV's own pool.
+**default config**: `thumb=1024` (box-filtered), `grid_exp=6` (a 64x64 finest grid), a
+6-level pyramid, `stride=1`, `feat_threads=2`. Absolute numbers scale with CPU clock and
+core count; the *shape* is consistent across machines. `examples/benchmark.py` prints the
+full picture on your own hardware -- config sweeps, where a frame goes internally, what the
+lazy maps cost, and how `feat_threads` interacts with OpenCV's own pool.
 
 The default targets 1080p and 4K sources. A 64x64 grid over a 1024px thumbnail puts one
 finest cell on ~30 source pixels of a 1080p frame, twice as fine as the older 256px-thumbnail
-default, and the pyramid runs 64,32,16,8,4,2 cells per dimension. That resolution is the
-point and it costs roughly 4x the older default; the old operating point is one config away:
-`GateConfig(thumb=256, stride=2, grid_exp=5, n_levels=4)`.
+default, and the pyramid runs 64,32,16,8,4,2 cells per dimension. `stride=1` visits every
+thumbnail pixel (16 samples per cell per axis): that is the front-end fastdet's models are
+trained on, and it makes the pass shareable with them, at roughly 4x the pixel work of
+`stride=2` and 16x that of `stride=4` -- on a recent laptop the imfeat pass is ~9 ms on one
+thread and ~5-6 ms on two to four. The cheaper operating points are one config away:
+`GateConfig(stride=4, resize_interp="nearest")` for the same grid with a sixteenth of the
+samples, or `GateConfig(thumb=256, stride=2, grid_exp=5, n_levels=4)` for the older
+256px point.
 
 What moves the number:
 
@@ -400,19 +411,25 @@ What moves the number:
 - **`feat_threads` is the main parallel lever.** imfeat splits its accumulate pass into
   disjoint bands of cell rows and the output is bit-identical at any thread count. 2 is a
   reasonable default when other work shares the machine, 4 when it does not.
-- **`stride` is the second lever:** `stride=1` ≈ 1.68 ms, `2` (default) ≈ 0.95 ms,
-  `3` ≈ 0.75 ms, `4` ≈ 0.66 ms. It simply subsamples which pixels the single accumulation
-  loop visits; the gradient stencil and the cell boundaries stay at full resolution, and
-  each cell keeps an identical sample count. What it costs is samples per cell, so the
-  binding constraint is `cell_px / stride >= 4` — at the default (`thumb=256`, `grid_exp=5`
-  → 8 px cells) that caps you at `stride=2`. Past that the structure maps degrade fast
-  (at 4 samples/cell the edge-energy map correlates only ~0.82 with the exact one).
+- **`stride` is the second lever:** the pixel work scales with `1/stride**2` (the
+  benchmark's sweep [8] prints the numbers on your machine). It simply subsamples which
+  pixels the single accumulation loop visits; the gradient stencil and the cell boundaries
+  stay at full resolution, and each cell keeps an identical sample count. What it costs is
+  samples per cell, so the binding constraint is `cell_px / stride >= 4`; past that the
+  structure maps degrade fast (at 4 samples/cell the edge-energy map correlates only ~0.82
+  with the exact one).
+- **`resize_interp`** is the thumbnail filter. `"area"` (default) is the box filter
+  fastdet's models are trained on, and OpenCV's general-ratio box filter is its slow path:
+  on a 1080p frame it measured ~12 ms on one thread here against 0.8 ms for `"nearest"`
+  (4K: 30 ms), spread over OpenCV's own thread pool when it has one; integer ratios and
+  upscaling take a fast path (~1 ms). It is the price of the shared front-end; a cheaper
+  filter has to change on fastdet's training side too.
 
 `stride`, `thumb` and `grid_exp` interact: what `stride` costs is samples per cell, so the
 binding constraint is `cell_px / stride >= 4` where `cell_px = thumb / 2**grid_exp`.
 `cfg.samples_per_cell` reports it, and `GateConfig` refuses outright any configuration where
-the stride steps over whole cells and leaves them with no samples at all. The default sits
-exactly on the floor of 4.
+the stride steps over whole cells and leaves them with no samples at all. The default has 16;
+`stride=4` sits exactly on the floor of 4.
 - **`n_levels` (pyramid depth) is nearly free:** `1` ≈ 0.79 ms → `4` ≈ 0.83 ms. Coarse
   levels are exact *sums* of the finer cells' accumulators, so depth costs no extra pass
   and no extra per-pixel work — only the (tiny) reduction over cells. Ask for all of them.
@@ -478,6 +495,7 @@ framegate/
 ├── docs/
 │   └── shot-reid.md       # re-ID decision rule, constants, known limitations
 ├── examples/
+│   ├── theme.py           # the viewers' shared dark theme, panels and window keys
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
 │   ├── shots.py           # live shot re-ID viewer: groups build up as the video plays
 │   ├── benchmark.py       # latency measurement
@@ -500,13 +518,19 @@ no matplotlib or benchmarking code.
 ## Examples & tests
 
 ```bash
-python examples/visualize.py path/to/video.mp4     # needs [viz]
+python examples/visualize.py path/to/video.mp4     # needs [viz]; --threads N sets imfeat's pool
 python examples/benchmark.py                        # synthetic, or pass a video path
 python examples/publish.py                          # publishing gate (synthetic, or pass a video)
-python examples/shots.py                            # live shot re-ID viewer (synthetic, or pass a video)
+python examples/shots.py                            # live shot re-ID viewer (synthetic, or pass a video); --threads N
 pytest                                              # needs [dev]; -s prints latencies
 ruff check . && black --check . && mypy            # quality gates; all clean, all [dev]
 ```
+
+The two live viewers share `examples/theme.py`: the dark dashboard look of
+[fastdet](https://github.com/PCJohn/fastdet)'s demo (`fastdet-demo`) and its keys --
+`q`/`Esc` quit, `space` pause, `s` save the figure. Their latency panels read
+framegate's own cost against matplotlib's; `--threads` is the imfeat worker count
+(`GateConfig.feat_threads`), which changes speed only.
 
 The examples and tests import `framegate` exactly as a downstream user would. Ruff,
 black and mypy are configured in `pyproject.toml`, so those three commands mean the same

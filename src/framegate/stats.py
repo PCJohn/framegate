@@ -15,6 +15,7 @@ from .config import GateConfig
 
 _F = len(imfeat.FEATURE_NAMES)  # 38 features per channel in a pyramid map
 _C = 3  # HSV
+_INTERP = {"area": cv2.INTER_AREA, "nearest": cv2.INTER_NEAREST}  # cfg.resize_interp
 
 
 @dataclass
@@ -283,10 +284,12 @@ class FrameGate:
         self._hsv = np.empty((t, t, 3), np.uint8)
 
     def _to_hsv(self, frame: np.ndarray, keep: bool) -> tuple:
-        """Resize to the thumbnail and produce HSV. Grayscale becomes H=S=0, V=luma,
-        so colour signals correctly read as zero. With `keep`, outputs are fresh
-        arrays the caller can hold; otherwise reused scratch buffers."""
+        """Resize to the thumbnail (cfg.resize_interp) and produce HSV. Grayscale
+        becomes H=S=0, V=luma, so colour signals correctly read as zero. With `keep`,
+        outputs are fresh arrays the caller can hold; otherwise reused scratch buffers.
+        """
         t = self.cfg.thumb
+        interp = _INTERP[self.cfg.resize_interp]
         hsv = np.empty((t, t, 3), np.uint8) if keep else self._hsv
         if frame.ndim == 2 or frame.shape[2] == 1:
             thumb = np.empty((t, t), np.uint8) if keep else self._gray
@@ -294,13 +297,13 @@ class FrameGate:
                 frame.reshape(frame.shape[0], frame.shape[1]),
                 (t, t),
                 dst=thumb,
-                interpolation=cv2.INTER_NEAREST,
+                interpolation=interp,
             )
             hsv[:, :, :2] = 0
             hsv[:, :, 2] = thumb
         else:
             thumb = np.empty((t, t, 3), np.uint8) if keep else self._bgr
-            cv2.resize(frame, (t, t), dst=thumb, interpolation=cv2.INTER_NEAREST)
+            cv2.resize(frame, (t, t), dst=thumb, interpolation=interp)
             cv2.cvtColor(thumb, cv2.COLOR_BGR2HSV, dst=hsv)
         return hsv, (thumb if keep else None)
 

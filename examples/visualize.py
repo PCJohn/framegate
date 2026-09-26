@@ -2,61 +2,38 @@
 (nothing here is imported by the library itself).
 
     python examples/visualize.py path/to/video.mp4
+    python examples/visualize.py clip.mp4 --threads 4     # imfeat worker threads
 
 Shows the appearance maps (motion / saliency / text / focus / structure), the per-cell
 moment grids, the temporal event signals (cut / fade / flicker / struct-corr),
 and a live latency panel separating framegate compute from matplotlib render --
 so the speed of the package is visible against the cost of just drawing it.
 
-Requires the [viz] extra:  pip install "framegate[viz]"
+Keys: ``q``/``Esc`` quit, ``space`` pause, ``s`` save the figure to the working
+directory. Requires the [viz] extra:  pip install "framegate[viz]"
 """
 
+import argparse
 import gc
-import sys
 import time
 from collections import deque
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import theme
 
-from framegate import Gate, ShotTracker
+from framegate import Gate, GateConfig, ShotTracker
 
 HISTORY = 300  # rolling time-series window (viz only)
 DRAW_EVERY = 3  # redraw the dashboard every N frames; compute still runs every frame
 DISPLAY_MAX = 480  # longest side of the displayed frame
-LAT_WIN = 30  # frames to average for the latency readout
 # Fixed display ranges for the map panels, so a near-static frame stays dark
 # instead of auto-stretching its noise floor to full brightness.
 MAP_VMAX = {"motion": 32.0, "saliency": 3.0, "texture": 24.0, "focus": 30.0}
 
 
-def heat(ax, title, cmap, clim=None):
-    ax.set_title(title, fontsize=8)
-    ax.set_xticks([])
-    ax.set_yticks([])
-    im = ax.imshow(
-        np.zeros((2, 2), np.float32), cmap=cmap, aspect="auto", interpolation="nearest"
-    )
-    if clim:
-        im.set_clim(*clim)
-    return im
-
-
-def tseries(ax, title, labels, colors):
-    ax.set_title(title, fontsize=8)
-    ax.set_xlim(0, HISTORY)
-    ax.tick_params(labelsize=6)
-    lns = [
-        ax.plot(np.zeros(HISTORY), lw=1.0, color=c, label=lab)[0]
-        for lab, c in zip(labels, colors, strict=True)
-    ]
-    if len(labels) > 1:
-        ax.legend(fontsize=6, loc="upper left", ncol=len(labels), framealpha=0.4)
-    return lns
-
-
-def run(src):
+def run(src, cfg=None):
     cap = cv2.VideoCapture(src)
     assert cap.isOpened(), f"cannot open {src}"
     sw, sh = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(
@@ -65,17 +42,16 @@ def run(src):
     scale = min(1.0, DISPLAY_MAX / max(sw, sh))
     W, H = max(1, int(sw * scale)), max(1, int(sh * scale))
 
-    gate = Gate()
+    gate = Gate(cfg)
     g = gate.cfg.grid_size
     tracker = ShotTracker(gate.cfg)  # shot_id + shot_group_id
 
-    fig = plt.figure(figsize=(17, 9))
-    gs = fig.add_gridspec(
-        4, 7, hspace=0.5, wspace=0.3, left=0.03, right=0.99, top=0.93, bottom=0.05
-    )
+    theme.apply()
+    fig = plt.figure(figsize=(17, 9), layout="constrained")
+    gs = fig.add_gridspec(4, 7, hspace=0.08, wspace=0.05)
 
     ax_frame = fig.add_subplot(gs[0:2, 0:3])
-    ax_frame.axis("off")
+    ax_frame.set_axis_off()
     im_frame = ax_frame.imshow(np.zeros((H, W, 3), np.uint8), aspect="auto")
     banner = ax_frame.text(
         0.5,
@@ -85,33 +61,35 @@ def run(src):
         va="center",
         fontsize=20,
         fontweight="bold",
-        color="white",
+        color=theme.TEXT,
         transform=ax_frame.transAxes,
-        bbox=dict(boxstyle="round", fc="black", alpha=0.6),
+        bbox={"boxstyle": "round", "fc": theme.BG, "ec": theme.EDGE, "alpha": 0.75},
     )
 
     # appearance maps (fixed clim, no colorbars)
-    im_mot = heat(
+    im_mot = theme.heat_axis(
         fig.add_subplot(gs[0, 3]), "motion (illum-inv)", "hot", (0, MAP_VMAX["motion"])
     )
-    im_sal = heat(
+    im_sal = theme.heat_axis(
         fig.add_subplot(gs[0, 4]), "saliency", "magma", (0, MAP_VMAX["saliency"])
     )
-    im_tex = heat(
+    im_tex = theme.heat_axis(
         fig.add_subplot(gs[0, 5]), "text", "cividis", (0, MAP_VMAX["texture"])
     )
     # exact per-cell moment grids (autoscaled)
-    im_luma = heat(fig.add_subplot(gs[1, 3]), "luma  (V mean)", "inferno")
-    im_var = heat(fig.add_subplot(gs[1, 4]), "contrast  (V var)", "viridis")
-    im_sat = heat(fig.add_subplot(gs[1, 5]), "saturation  (S mean)", "plasma")
-    im_foc = heat(
+    im_luma = theme.heat_axis(fig.add_subplot(gs[1, 3]), "luma  (V mean)", "inferno")
+    im_var = theme.heat_axis(fig.add_subplot(gs[1, 4]), "contrast  (V var)", "viridis")
+    im_sat = theme.heat_axis(
+        fig.add_subplot(gs[1, 5]), "saturation  (S mean)", "plasma"
+    )
+    im_foc = theme.heat_axis(
         fig.add_subplot(gs[0, 6]),
         "focus (edge sharpness)",
         "bone",
         (0, MAP_VMAX["focus"]),
     )
     ax_st = fig.add_subplot(gs[1, 6])
-    ax_st.set_title("structure  (flat/edge/tex = RGB)", fontsize=8)
+    ax_st.set_title("structure  (RGB = flat/edge/tex)")
     ax_st.set_xticks([])
     ax_st.set_yticks([])
     im_st = ax_st.imshow(
@@ -120,41 +98,38 @@ def run(src):
 
     # cut-score timeline with threshold + cut markers
     ax_cut = fig.add_subplot(gs[2, 0:3])
-    ax_cut.set_title("cut score   (threshold dotted, cut = red)", fontsize=8)
-    ax_cut.set_xlim(0, HISTORY)
-    ax_cut.tick_params(labelsize=6)
-    (ln_cut,) = ax_cut.plot(np.zeros(HISTORY), color="C3", lw=1.1)
-    ax_cut.axhline(gate.cfg.cut_dissim, color="r", ls=":", lw=0.8)
+    (ln_cut,) = theme.series_axis(
+        ax_cut, "cut score   (threshold dotted, cut = rose)", ["cut score"], HISTORY
+    )
+    ax_cut.axhline(gate.cfg.cut_dissim, color=theme.ROSE, ls=":", lw=1.0)
 
     # latency timeline: framegate compute vs matplotlib render
     ax_lat = fig.add_subplot(gs[2, 3:7])
-    ln_lat = tseries(
-        ax_lat, "framegate latency (ms/frame)", ["core", "core+maps"], ["C0", "C1"]
+    ln_lat = theme.series_axis(
+        ax_lat,
+        f"framegate latency   [{gate.cfg.feat_threads} imfeat thread(s)]",
+        ["core (gate)", "core + maps"],
+        HISTORY,
+        [theme.AMBER, theme.GREEN],
     )
+    ax_lat.set_ylabel("ms")
+    ax_lat.set_xlabel(f"last {HISTORY} frames")
 
     # temporal event signals
     ax_ev = fig.add_subplot(gs[3, 0:2])
     ax_ev.set_ylim(-1.05, 1.05)
-    ln_ev = tseries(
-        ax_ev, "events", ["struct_corr", "fade", "flicker"], ["C2", "C0", "C4"]
+    ln_ev = theme.series_axis(
+        ax_ev,
+        "events",
+        ["struct_corr", "fade", "flicker"],
+        HISTORY,
+        [theme.GREEN, theme.BLUE, theme.VIOLET],
     )
 
-    ax_txt = fig.add_subplot(gs[3, 2:7])
-    ax_txt.axis("off")
-    txt = ax_txt.text(
-        0.01,
-        0.99,
-        "",
-        va="top",
-        ha="left",
-        fontsize=9.5,
-        linespacing=1.35,
-        family="monospace",
-        transform=ax_txt.transAxes,
-    )
+    txt = theme.readout(fig.add_subplot(gs[3, 2:7]), fontsize=9.5)
 
-    hist = {
-        k: deque([0.0] * HISTORY, maxlen=HISTORY)
+    hist = {  # NaN until a frame lands there: the plots and medians skip the gap
+        k: deque([np.nan] * HISTORY, maxlen=HISTORY)
         for k in (
             "cut_score",
             "struct_corr",
@@ -168,14 +143,15 @@ def run(src):
     cut_frames = []
     cut_lines = []
 
-    plt.ion()
-    plt.show()
+    window = theme.Window(fig, "framegate", save_prefix="framegate_dashboard")
     fidx = 0
     sid, gid = 0, 0  # last-known shot id / group id (persist through drops)
     last_render = 0.0
+    fps = None
+    last_tick = time.perf_counter()
     gc.disable()  # GC pauses are the main per-frame latency spike; reap manually below
     try:
-        while plt.fignum_exists(fig.number):
+        while not window.closed:
             ret, frame = cap.read()
             if not ret:
                 break
@@ -207,6 +183,10 @@ def run(src):
             )
             t2 = time.perf_counter()
             t_core, t_maps = (t1 - t0) * 1e3, (t2 - t1) * 1e3
+            now = time.perf_counter()
+            instant = 1.0 / max(now - last_tick, 1e-6)
+            fps = instant if fps is None else 0.9 * fps + 0.1 * instant
+            last_tick = now
 
             if not (fs.blank or sig.freeze):  # blank/frozen frames are not shots
                 sid, gid = tracker.update(fs, sig, fidx)
@@ -254,7 +234,9 @@ def run(src):
             # --- cut timeline + markers ---
             cs = np.asarray(hist["cut_score"])
             ln_cut.set_ydata(cs)
-            ax_cut.set_ylim(0, max(cs.max(), gate.cfg.cut_dissim) * 1.1 + 1e-3)
+            ax_cut.set_ylim(
+                0, max(float(np.nanmax(cs)), gate.cfg.cut_dissim) * 1.1 + 1e-3
+            )
             for c in cut_lines:
                 c.remove()
             cut_lines = []
@@ -262,18 +244,17 @@ def run(src):
             for f in cut_frames:
                 if origin <= f <= fidx:
                     cut_lines.append(
-                        ax_cut.axvline(f - origin, color="red", lw=1.0, alpha=0.7)
+                        ax_cut.axvline(f - origin, color=theme.ROSE, lw=1.0, alpha=0.8)
                     )
 
             for ln, k in zip(ln_ev, ("struct_corr", "fade", "flicker"), strict=True):
                 ln.set_ydata(hist[k])
             for ln, k in zip(ln_lat, ("core", "maps"), strict=True):
                 ln.set_ydata(hist[k])
-            a_core = np.mean(list(hist["core"])[-LAT_WIN:])
-            a_full = np.mean(
-                list(hist["maps"])[-LAT_WIN:]
-            )  # maps history holds core+maps
-            ax_lat.set_ylim(0, max(hist["maps"]) * 1.3 + 0.1)
+            med_core = float(np.nanmedian(hist["core"]))
+            med_full = float(np.nanmedian(hist["maps"]))  # maps history holds core+maps
+            top = float(np.nanpercentile(hist["maps"], 98)) * 1.2
+            ax_lat.set_ylim(0, max(top, 1.0))
 
             state = (
                 "BLANK"
@@ -283,9 +264,10 @@ def run(src):
             txt.set_text(
                 f"state      {state}\n"
                 f"shot       s{sid:<4d} group g{gid}\n"
-                f"compute    {a_full:5.2f} ms   ({1000 / max(a_full, 1e-6):4.0f} fps)\n"
-                f"  core     {a_core:5.2f} ms   + maps {a_full - a_core:4.2f}\n"
-                f"  render   {last_render:5.2f} ms   (matplotlib, 1/{DRAW_EVERY} frames)\n"
+                f"core (gate)  {t_core:6.2f} ms   median {med_core:6.2f}\n"
+                f"+ maps       {t_maps:6.2f} ms   median {med_full - med_core:6.2f}\n"
+                f"render       {last_render:6.2f} ms   (matplotlib, 1/{DRAW_EVERY} frames)\n"
+                f"total        {t_core + t_maps:6.2f} ms   {fps:5.1f} fps   frame {fidx}\n"
                 f"cut_score  {sig.cut_score:5.3f}   corr {sig.struct_corr:+.3f}\n"
                 f"gain/bias  {sig.gain:5.2f} / {sig.bias:+.1f}\n"
                 f"fade/flick {sig.fade:+.2f} / {sig.flicker:.2f}\n"
@@ -296,23 +278,44 @@ def run(src):
             )
 
             fig.suptitle(
-                f"framegate   |   frame {fidx}   |   shot {sid} \u00b7 group {gid}"
-                f"   |   {src}",
-                fontsize=11,
+                f"framegate   |   frame {fidx}   |   shot {sid} · group {gid}"
+                f"   |   {src}"
             )
-            tr = time.perf_counter()
-            fig.canvas.draw_idle()
-            fig.canvas.flush_events()
-            last_render = (time.perf_counter() - tr) * 1e3
+            last_render = window.draw()
+            window.pump()
+    except KeyboardInterrupt:
+        print("\ninterrupted")
     finally:
         gc.enable()
         cap.release()
+        window.close()
         plt.ioff()
-        print(f"done. {fidx} frames.")
+        if fidx:
+            print(
+                f"done. {fidx} frames; gate median {np.nanmedian(hist['core']):.2f} ms,"
+                f" with maps {np.nanmedian(hist['maps']):.2f} ms"
+                f" ({gate.cfg.feat_threads} imfeat thread(s))."
+            )
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="live framegate dashboard on a video",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("video", help="a video file (anything OpenCV can open)")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help=f"imfeat worker threads (default {GateConfig().feat_threads}; "
+        "the output is bit-identical at any count)",
+    )
+    args = parser.parse_args(argv)
+    cfg = GateConfig(feat_threads=args.threads) if args.threads else None
+    run(args.video, cfg)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("usage: python examples/visualize.py <video.mp4>")
-        sys.exit(1)
-    run(sys.argv[1])
+    main()

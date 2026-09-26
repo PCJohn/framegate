@@ -5,6 +5,7 @@ Pure consumer of the public API (nothing here is imported by the library).
     python examples/shots.py path/to/video.mp4
     python examples/shots.py                    # no arg -> synthetic A,B,C,A,B demo
     python examples/shots.py video.mp4 --batch  # old whole-clip summary instead
+    python examples/shots.py video.mp4 --threads 4   # imfeat worker threads
 
 Live layout (three panels):
 
@@ -20,19 +21,20 @@ A re-identification is read straight off the public (shot_id, group_id) stream: 
 new shot reuses a group_id already seen, that is a recurrence, and the matched
 reference is the most recent shot recorded for that group.
 
-Requires the [viz] extra:  pip install "framegate[viz]"
+Keys: ``q``/``Esc`` quit, ``space`` pause, ``s`` save the figure to the working
+directory. Requires the [viz] extra:  pip install "framegate[viz]"
 """
 
+import argparse
 import gc
 import math
-import sys
-import threading
 
 import cv2
 import matplotlib.pyplot as plt
 import numpy as np
+import theme
 
-from framegate import Gate, ShotTracker
+from framegate import Gate, GateConfig, ShotTracker
 
 THUMB_W = 160  # display thumbnail width (px)
 REP_OFFSET = 4  # representative frame = this many frames into a shot (skip transition)
@@ -90,11 +92,11 @@ class Groups:
 
 
 def run_live(frames, cfg=None):
-    _closed = threading.Event()
     gate = Gate(cfg)
     tracker = ShotTracker(gate.cfg)
     groups = Groups()
 
+    theme.apply()
     fig = plt.figure(figsize=(14, 7.5))
     gs = fig.add_gridspec(
         2,
@@ -120,9 +122,9 @@ def run_live(frames, cfg=None):
         va="center",
         fontsize=15,
         fontweight="bold",
-        color="white",
+        color=theme.TEXT,
         transform=ax_vid.transAxes,
-        bbox=dict(boxstyle="round", fc="black", alpha=0.6),
+        bbox={"boxstyle": "round", "fc": theme.BG, "ec": theme.EDGE, "alpha": 0.75},
     )
 
     # re-ID pair: current shot (left) vs matched reference (right)
@@ -131,21 +133,22 @@ def run_live(frames, cfg=None):
     ax_ref = fig.add_subplot(gs_pair[1])
     for ax in (ax_cur, ax_ref):
         _blank(ax)
-    ax_cur.set_title("current shot", fontsize=9)
-    ax_ref.set_title("matched reference", fontsize=9)
+    ax_cur.set_title("current shot")
+    ax_ref.set_title("matched reference")
     im_cur = ax_cur.imshow(np.zeros((2, 2, 3), np.uint8), aspect="auto")
     im_ref = ax_ref.imshow(np.zeros((2, 2, 3), np.uint8), aspect="auto")
 
     # group gallery
     ax_gal = fig.add_subplot(gs[1, 1])
     ax_gal.axis("off")
-    ax_gal.set_title("groups seen", fontsize=9)
+    ax_gal.set_title("groups seen")
 
-    fig.suptitle("framegate shot re-identification", fontsize=13)
+    fig.suptitle(
+        "framegate shot re-identification"
+        f"   [{gate.cfg.feat_threads} imfeat thread(s)]"
+    )
 
-    plt.ion()
-    fig.canvas.mpl_connect("close_event", lambda _e: _closed.set())
-    plt.show()
+    window = theme.Window(fig, "framegate shots", save_prefix="framegate_shots")
 
     sid, gid = 0, 0
     n_in_shot = 0
@@ -153,7 +156,7 @@ def run_live(frames, cfg=None):
     drew_gallery = -1  # last group count the gallery was drawn at
     fidx = -1
     for frame in frames:
-        if _closed.is_set() or not plt.fignum_exists(fig.number):
+        if window.closed:
             break
         fidx += 1
         if fidx % 300 == 0:
@@ -174,7 +177,7 @@ def run_live(frames, cfg=None):
                 im_ref.set_data(ref_thumb)
                 for ax in (ax_cur, ax_ref):
                     _border(ax, _color(gid))
-                ax_ref.set_title(f"group {gid} · first seen shot {ref_sid}", fontsize=9)
+                ax_ref.set_title(f"group {gid} · first seen shot {ref_sid}")
                 hold = HOLD
         else:
             gid = new_gid  # stable within a shot; keep latest
@@ -189,7 +192,7 @@ def run_live(frames, cfg=None):
         banner.set_text(
             f"frame {fidx}   shot {sid}   group {gid}" + ("   ● RE-ID" if recur else "")
         )
-        banner.set_color("#ffd54a" if recur else "white")
+        banner.set_color(theme.YELLOW if recur else theme.TEXT)
         _border(ax_vid, _color(gid), lw=6)
         if hold > 0:
             hold -= 1
@@ -202,27 +205,17 @@ def run_live(frames, cfg=None):
             _draw_gallery(fig, ax_gal, groups)
             drew_gallery = len(groups.order)
 
-        if not _pump(fig):  # closed mid-frame -> stop cleanly
+        window.draw()
+        if not window.pump():  # closed mid-frame -> stop cleanly
             break
 
-    if not _closed.is_set() and plt.fignum_exists(fig.number):
+    print(f"done. {fidx + 1} frames, {len(groups.order)} groups.")
+    if not window.closed:
         banner.set_text(f"done · {fidx + 1} frames · {len(groups.order)} groups")
-        banner.set_color("white")
-        _pump(fig)
-        plt.ioff()
-        plt.show(block=True)  # hold the final frame until the user closes it
-
-
-def _pump(fig) -> bool:
-    """Redraw and process UI events. Returns False if the window was closed during the
-    call, so the caller can stop without the backend raising on a dead canvas."""
-    try:
-        fig.canvas.draw_idle()
-        fig.canvas.flush_events()
-        plt.pause(0.001)
-        return plt.fignum_exists(fig.number)
-    except Exception:  # backend tears the canvas down mid-call on close
-        return False
+        banner.set_color(theme.TEXT)
+        window.draw()
+        window.block()  # hold the final frame until the window is closed
+    window.close()
 
 
 def _draw_gallery(fig, ax_gal, groups):
@@ -244,7 +237,7 @@ def _draw_gallery(fig, ax_gal, groups):
         _blank(sub)
         sub.imshow(groups.rep[g])
         _border(sub, _color(g), lw=3)
-        sub.set_title(f"g{g}", fontsize=8, color=_color(g), pad=1)
+        sub.set_title(f"g{g}", fontsize=8, color=_color(g), pad=1, loc="center")
 
 
 # --- batch summary (the old behaviour, kept for a quick whole-clip overview) ---
@@ -278,10 +271,11 @@ def run_batch(frames, cfg=None):
     disp = shots[:48]
     cols = min(8, len(disp)) or 1
     rows = max(1, math.ceil(len(disp) / cols))
+    theme.apply()
     fig, axes = plt.subplots(
         rows, cols, figsize=(cols * 1.9, rows * 2.1), squeeze=False
     )
-    fig.suptitle(f"{len(shots)} shots  |  {n_groups} groups", fontsize=12)
+    fig.suptitle(f"{len(shots)} shots  |  {n_groups} groups")
     for i, ax in enumerate(axes.flat):
         _blank(ax)
         if i >= len(disp):
@@ -290,7 +284,7 @@ def run_batch(frames, cfg=None):
         s = disp[i]
         ax.imshow(s["rep"])
         _border(ax, _color(s["gid"]))
-        ax.set_title(f"s{s['sid']} · g{s['gid']}", fontsize=9, color=_color(s["gid"]))
+        ax.set_title(f"s{s['sid']} · g{s['gid']}", color=_color(s["gid"]), loc="center")
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     plt.show()
 
@@ -325,12 +319,30 @@ def synthetic_frames():
     )
 
 
-def main(argv):
-    args = [a for a in argv[1:] if not a.startswith("-")]
-    batch = "--batch" in argv[1:]
-    frames = video_frames(args[0]) if args else synthetic_frames()
-    (run_batch if batch else run_live)(frames)
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="live shot re-identification viewer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "video", nargs="?", help="a video file; none -> the synthetic A,B,C,A,B demo"
+    )
+    parser.add_argument(
+        "--batch", action="store_true", help="whole-clip summary instead of live"
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=None,
+        help=f"imfeat worker threads (default {GateConfig().feat_threads}; "
+        "the output is bit-identical at any count)",
+    )
+    args = parser.parse_args(argv)
+    cfg = GateConfig(feat_threads=args.threads) if args.threads else None
+    frames = video_frames(args.video) if args.video else synthetic_frames()
+    (run_batch if args.batch else run_live)(frames, cfg)
 
 
 if __name__ == "__main__":
-    main(sys.argv)
+    main()

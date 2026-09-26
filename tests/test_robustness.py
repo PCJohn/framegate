@@ -245,7 +245,7 @@ def test_text_pure_noise_is_a_known_limitation():
 
 
 def test_text_is_low_on_non_text():
-    g = Gate()
+    g = Gate(FIXTURE_CFG)  # fixture-scale config: see the note above FIXTURE_CFG
     for img in (
         synth.solid(128),
         synth.gradient(),

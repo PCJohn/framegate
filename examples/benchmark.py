@@ -204,6 +204,7 @@ def _map_costs(frames, warmup=6, repeats=25):
     return out
 
 
+DEFAULT = GateConfig()  # the shipped operating point, named in the sweep headers
 RESOLUTIONS = [
     ("360p", 360, 640),
     ("480p", 480, 854),
@@ -298,7 +299,9 @@ def run_synthetic():
     finally:
         cv2.setNumThreads(dflt)
 
-    _header("[6] input-size sweep (default config: grid 64, 6-level pyramid, stride 4)")
+    _header(
+        f"[6] input-size sweep (default config: grid 64, 6-level pyramid, stride {DEFAULT.stride})"
+    )
     # measured per-resolution (frames freed between) so 4K doesn't blow up memory; the
     # cross-resolution signal is large, so sequential measurement is fine here
     for name, h, w in RESOLUTIONS:
@@ -318,7 +321,7 @@ def run_synthetic():
         del fr
 
     _header(
-        "[7] grid-size sweep (1080p, default stride 4)  -- grid = 2**grid_exp cells/dim"
+        f"[7] grid-size sweep (1080p, stride {DEFAULT.stride})  -- grid = 2**grid_exp cells/dim"
     )
     res = _bench_group(
         _cfg_items(
@@ -341,7 +344,7 @@ def run_synthetic():
     for label in res:
         _print(label, res[label])
 
-    _header("[9] thumb-size sweep (1080p, grid 64, default stride 4)")
+    _header(f"[9] thumb-size sweep (1080p, grid 64, stride {DEFAULT.stride})")
     res = _bench_group(
         _cfg_items(
             [(f"thumb={tb}", GateConfig(thumb=tb)) for tb in (512, 1024, 2048)],
@@ -352,7 +355,7 @@ def run_synthetic():
         _print(label, res[label])
 
     _header(
-        "[10] pyramid-depth sweep (1080p, grid 64, stride 4)  -- n_levels = grids per pass"
+        f"[10] pyramid-depth sweep (1080p, grid 64, stride {DEFAULT.stride})  -- n_levels = grids per pass"
     )
     res = _bench_group(
         _cfg_items(

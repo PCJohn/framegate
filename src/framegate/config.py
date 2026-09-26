@@ -17,6 +17,8 @@ from dataclasses import dataclass, fields, replace
 
 import yaml
 
+RESIZE_INTERP = ("area", "nearest")  # thumbnail filters FrameGate knows
+
 
 def _yaml_val(v):
     return str(v).lower() if isinstance(v, bool) else v
@@ -25,8 +27,14 @@ def _yaml_val(v):
 @dataclass(frozen=True)
 class GateConfig:
     # --- frame extraction ---
+    # The thumbnail, its resize filter and the stride are fastdet's front-end exactly
+    # (Detector.front_end_spec), so one imfeat pass can feed both the gate and a fastdet
+    # model. The cheaper, coarser operating point is stride=4, resize_interp="nearest".
     thumb: int = 1024  # thumbnail side for stats
-    stride: int = 4  # grid stride; >1 = indexed-gather over a subsample
+    resize_interp: str = (
+        "area"  # thumbnail filter: "area" (box, like fastdet) or "nearest"
+    )
+    stride: int = 1  # grid stride; >1 = indexed-gather over a subsample
     feat_threads: int = 2  # imfeat worker threads; output is bit-identical at any count
     grid_exp: int = 6  # 2^grid_exp cells/dim (6 -> 64x64); output/finest level
     n_levels: int = 6  # dyadic pyramid levels from grid_exp (6..1 -> 64..2)
@@ -105,6 +113,12 @@ class GateConfig:
 
     # --- video-level optimization ---
     skip_duplicates: bool = True  # reuse stats for byte-identical consecutive frames
+
+    def __post_init__(self):
+        if self.resize_interp not in RESIZE_INTERP:
+            raise ValueError(
+                f"resize_interp={self.resize_interp!r}: want one of {RESIZE_INTERP}"
+            )
 
     @property
     def grid_size(self) -> int:
