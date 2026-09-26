@@ -13,7 +13,7 @@ uses the defaults, and ``to_yaml()`` generates a template from the live fields o
 (``python -m framegate`` prints one).
 """
 
-from dataclasses import dataclass, fields, replace
+from dataclasses import MISSING, dataclass, field, fields, replace
 
 import yaml
 
@@ -21,7 +21,15 @@ RESIZE_INTERP = ("area", "nearest")  # thumbnail filters FrameGate knows
 
 
 def _yaml_val(v):
-    return str(v).lower() if isinstance(v, bool) else v
+    if isinstance(v, bool):
+        return str(v).lower()
+    if isinstance(v, dict):
+        return yaml.safe_dump(v, default_flow_style=True).strip()
+    return v
+
+
+def _default_of(f):
+    return f.default if f.default is not MISSING else f.default_factory()
 
 
 @dataclass(frozen=True)
@@ -108,6 +116,14 @@ class GateConfig:
         0.7  # down-weight luma change with no edge motion (0 = off)
     )
 
+    # --- learned maps (fastdet models; see models.py) ---
+    # <name>.fdt files in models_dir (relative to the package) load by name, and models
+    # maps a name to a path on top (None drops a bundled one). Each runs on the gate's
+    # imfeat pass and lands on FrameStats.model_maps[name]; a "text" model replaces the
+    # heuristic text map. fastdet is optional: without it, bundled models are skipped.
+    models_dir: str = "models"
+    models: dict = field(default_factory=dict)
+
     # --- output ---
     return_frames: bool = True  # attach thumb+HSV to FrameStats for caller reuse
 
@@ -174,7 +190,7 @@ class GateConfig:
             "# framegate config template (generated from GateConfig defaults).\n"
             "# See the GateConfig dataclass for what each key does.\n\n"
         )
-        lines = [f"{f.name}: {_yaml_val(f.default)}" for f in fields(cls)]
+        lines = [f"{f.name}: {_yaml_val(_default_of(f))}" for f in fields(cls)]
         return head + "\n".join(lines) + "\n"
 
     def replace(self, **overrides) -> "GateConfig":

@@ -3,7 +3,7 @@
 video the temporal layer (StreamAnalyzer) consumes a stream of FrameStats.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 
 import cv2
@@ -12,6 +12,7 @@ import numpy as np
 
 from . import signals as S
 from .config import GateConfig
+from .models import ModelBank
 
 _F = len(imfeat.FEATURE_NAMES)  # 38 features per channel in a pyramid map
 _C = 3  # HSV
@@ -46,6 +47,9 @@ class FrameStats:
         None  # imfeat structure maps for V: "grid_0" (cells,cells,5) + "global" (5,)
     )
     phash: int = 0  # whole-frame luma pHash (imfeat), one uint64; shot-memory key
+    model_maps: dict = field(
+        default_factory=dict
+    )  # name -> (G,G) float32 probabilities from the fastdet models loaded (models.py)
 
     # --- per-channel grids (views; raw moments) ---
     @property
@@ -110,9 +114,14 @@ class FrameStats:
 
     @cached_property
     def text(self) -> np.ndarray:
-        """(G,G) text likelihood from low-level texture: a fine, achromatic,
-        coherent, bimodal cue. Tuned for dense/printed text (body text, captions, UI);
-        a cue, not OCR. See signals.text."""
+        """(G,G) text likelihood. With a ``text`` model loaded (models.py) this is its
+        probability map in [0, 1]; otherwise the heuristic cue from low-level texture --
+        fine, achromatic, coherent, bimodal -- an unnormalised score tuned for
+        dense/printed text (body text, captions, UI). A cue, not OCR. See signals.text.
+        """
+        learned = self.model_maps.get("text")
+        if learned is not None:
+            return learned
         c = self.cfg
         return S.text(
             self.grid_V,
@@ -263,12 +272,15 @@ class FrameGate:
     (the scratch buffers are reused per call); use one FrameGate per stream.
 
     Holds one imfeat worker pool of `cfg.feat_threads` threads, spawned here and
-    parked between frames. One pool per FrameGate, so N streams mean N pools --
-    budget against imfeat.cpu_count() if other real-time work shares the CPU."""
+    parked between frames, and the fastdet models the config names (models.py), which
+    score the same pass. One pool per FrameGate, so N streams mean N pools -- budget
+    against imfeat.cpu_count() if other real-time work shares the CPU. `close()` joins
+    the pools; call it before interpreter shutdown in long-running hosts."""
 
     def __init__(self, cfg: GateConfig | None = None):
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
+        self._models = ModelBank(self.cfg)
         # One extractor, one pass: moments AND structure, for every channel, on the
         # same cells. imfeat computes every feature group for every channel, always.
         self._feat = imfeat.FeatureComputer(
@@ -342,6 +354,11 @@ class FrameGate:
             < self.cfg.edge_thresh
         )
 
+        # The learned maps, computed now: they consume the imfeat result, which is not
+        # kept (a FrameStats outlives its frame in the rolling windows, and the result
+        # is megabytes), and a model in the config is a request to run it.
+        model_maps = self._models.maps(p, (h, w)) if self._models else {}
+
         return FrameStats(
             chan=chan,
             grid=grid,
@@ -355,4 +372,18 @@ class FrameGate:
             phash=int(
                 p.hashes[imfeat.HASHES.index("phash"), S.CH_V]
             ),  # luma, for shot memory
+            model_maps=model_maps,
         )
+
+    @property
+    def models(self) -> list[str]:
+        """Names of the loaded models (the keys of `FrameStats.model_maps`)."""
+        return self._models.names
+
+    def close(self) -> None:
+        """Join the imfeat pool and the models' scorer threads. The gate is unusable
+        afterwards. Python does this when the object dies, but do it explicitly before
+        interpreter shutdown on Windows, where joining threads during DLL unload can
+        stall the process."""
+        self._models.close()
+        self._feat = None

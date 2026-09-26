@@ -45,6 +45,17 @@ class Gate:
         """Analyze a single image. No temporal state is touched."""
         return self._gate.process(img)
 
+    @property
+    def models(self) -> list[str]:
+        """Names of the fastdet models loaded (see models.py); their maps are on
+        `FrameStats.model_maps`."""
+        return self._gate.models
+
+    def close(self) -> None:
+        """Release the imfeat pool and the models (their threads are joined). Call it
+        when a stream ends in a long-running host, and before exit on Windows."""
+        self._gate.close()
+
     def frame(self, frame: np.ndarray) -> tuple:
         """Analyze the next video frame. Returns (FrameStats, TemporalSignals)."""
         if (

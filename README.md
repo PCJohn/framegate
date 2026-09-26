@@ -120,8 +120,9 @@ so the one imfeat pass the gate makes can also feed a fastdet model.
 The gate is a cheap front door: run it on every frame, then spend real compute only where
 and when it says to.
 
-1. **One `Gate` per stream, constructed once.** It owns the scratch buffers and the
-   temporal state. Not thread-safe -- use one `Gate` per thread.
+1. **One `Gate` per stream, constructed once.** It owns the scratch buffers, the
+   temporal state and the worker pools; `close()` it when the stream ends. Not
+   thread-safe -- use one `Gate` per thread.
 2. **Branch on the cheap signals before the expensive model:**
    - `stats.blank` -> skip the frame entirely.
    - `sig.cut` -> reset shot-level state (re-key a tracker, start a new segment).
@@ -168,7 +169,8 @@ Single-frame (`FrameStats`, available for images and video):
 | `clipping`       | Exposure asymmetry: >0 crushed shadows, <0 blown highlights. |
 | `noise_floor`    | Std of the flattest cell (~sensor/compression noise). |
 | `saliency`       | (G×G) coarse saliency map. |
-| `text`           | (G×G) text likelihood: fine, achromatic, horizontally-coherent, bimodal texture. A cue for dense/printed text, not OCR. |
+| `text`           | (G×G) text likelihood: the `text` model's probabilities when one is loaded (see [Learned maps](#learned-maps-fastdet-models)), else the heuristic cue -- fine, achromatic, horizontally-coherent, bimodal texture; dense/printed text, not OCR. |
+| `model_maps`     | `{name: (G×G)}` probability maps from the loaded fastdet models (`face`, `person`, ... as they are added); empty without models. |
 | `edge_energy`    | (G×G) gradient (edge) energy per cell. |
 | `coherence`      | (G×G) edge anisotropy in [0,1]; 1 = a single dominant orientation. |
 | `cornerness`     | (G×G) Shi-Tomasi corner strength (smaller structure-tensor eigenvalue). |
@@ -314,7 +316,41 @@ a universal one. Baking objects in would trade the library's generality and tiny
 footprint for heuristics that underperform the real thing. The classical literature
 agrees: text/region localization is built from generic low-level features (edge density,
 texture, colour) feeding heuristics or a tiny classifier — which is the layer above this
-one.
+one. That layer now has a home: the learned maps below are exactly such tiny classifiers
+over these statistics, trained elsewhere and scored on the gate's own pass.
+
+### Learned maps (fastdet models)
+
+[fastdet](https://github.com/PCJohn/fastdet) trains a per-cell tree model on the same
+imfeat pyramid the gate computes -- its front-end *is* the default `GateConfig` (1024-px
+box-filtered thumbnail, HSV, stride 1, the 64..2 grid pyramid) -- and ships it as one
+small `.fdt` file. The gate runs such models on the pass it already makes, so a model
+adds only its scorer (well under a millisecond on a couple of threads) per frame:
+
+- **By name.** Every `<name>.fdt` in the bundled `models/` folder of the package loads
+  as the map `stats.model_maps[name]`, a `(G×G)` float32 probability map. A `text.fdt`
+  replaces the heuristic `text` map (`stats.text` becomes its probabilities); any other
+  name -- `face`, `person`, ... -- is just a new map, the library knows nothing about
+  what it detects. `Gate.models` lists what loaded.
+- **By config.** `GateConfig(models={"text": "path/to/model.fdt"})` points at a file
+  elsewhere, `models={"text": None}` skips a bundled one, and `models_dir` moves the
+  bundled folder (relative to the package, or absolute). The YAML template carries both.
+- **Fallback.** With no `text` model there is still a text map: the heuristic cue above.
+  Without fastdet installed, bundled models are skipped with a warning and the
+  heuristics stay in use; a model named explicitly in `models` requires fastdet
+  (`pip install git+https://github.com/PCJohn/fastdet`).
+- **Checked.** A model carries the front-end it was trained on
+  (`Detector.front_end_spec`); the gate refuses one that does not match its own
+  `thumb`, `resize_interp`, `stride` or pyramid, since the features would be silently
+  wrong. The maps are computed at extraction, not lazily: a model in the config is a
+  request to run it, and the imfeat result it needs is not kept on `FrameStats`.
+- **One pool.** A detector used this way never spawns its own imfeat threads; its
+  scorer uses `feat_threads` threads. `Gate.close()` (and `Publisher.close()`) joins
+  the pools -- call it when a stream ends, and before interpreter shutdown on Windows.
+
+`examples/visualize.py --model text.fdt` shows the model's map in the `text` panel
+(`--model NAME=PATH` for others), and `tests/test_models.py` proves the plumbing: the
+map the gate hands back equals fastdet's own `predict_proba` on the frame, bit for bit.
 
 ## Configuration
 
@@ -491,7 +527,9 @@ framegate/
 │   ├── publish.py         # Publisher + Packet (pub/sub node; drops blank/frozen frames)
 │   ├── shotmem.py         # ShotMemory + ShotTracker: shot re-identification (L2)
 │   ├── reid.py            # Bernoulli shot model + population null (ShotProfile, score, Background)
-│   └── longterm.py        # L3 mmap prototype-index stub
+│   ├── longterm.py        # L3 mmap prototype-index stub
+│   ├── models.py          # learned maps: fastdet models scored on the gate's pass
+│   └── models/            # bundled <name>.fdt models (text.fdt replaces the heuristic text map)
 ├── docs/
 │   └── shot-reid.md       # re-ID decision rule, constants, known limitations
 ├── examples/
@@ -509,7 +547,8 @@ framegate/
     ├── test_publish.py    # Publisher drop policy + frame_id / shot_id / shot_group_id
     ├── test_structure.py  # structure-tensor feature plumbing
     ├── test_reid.py       # Bernoulli model + Background: exactness, loose-match, latency
-    └── test_shotmem.py    # ShotMemory + ShotTracker: group ids, recall+score, metadata, ABAB
+    ├── test_shotmem.py    # ShotMemory + ShotTracker: group ids, recall+score, metadata, ABAB
+    └── test_models.py     # learned maps == fastdet's own prediction; lookup, overrides, refusals
 ```
 
 All visualization and timing code lives in `examples/` — the library itself contains

@@ -2,12 +2,20 @@
 (nothing here is imported by the library itself).
 
     python examples/visualize.py path/to/video.mp4
-    python examples/visualize.py clip.mp4 --threads 4     # imfeat worker threads
+    python examples/visualize.py clip.mp4 --threads 4          # imfeat worker threads
+    python examples/visualize.py clip.mp4 --model text.fdt     # a fastdet text model
+    python examples/visualize.py clip.mp4 --model face=face.fdt --model text=text.fdt
 
 Shows the appearance maps (motion / saliency / text / focus / structure), the per-cell
 moment grids, the temporal event signals (cut / fade / flicker / struct-corr),
 and a live latency panel separating framegate compute from matplotlib render --
 so the speed of the package is visible against the cost of just drawing it.
+
+``--model`` loads a fastdet model onto the gate's own imfeat pass (``NAME=PATH``; a
+bare path means ``text``). A text model replaces the heuristic text map in the ``text``
+panel, whose scale then becomes a probability; models the gate finds in its bundled
+``models/`` folder load without the flag. Any other model's map is on
+``FrameStats.model_maps`` but is not drawn here.
 
 Keys: ``q``/``Esc`` quit, ``space`` pause, ``s`` save the figure to the working
 directory. Requires the [viz] extra:  pip install "framegate[viz]"
@@ -73,8 +81,12 @@ def run(src, cfg=None):
     im_sal = theme.heat_axis(
         fig.add_subplot(gs[0, 4]), "saliency", "magma", (0, MAP_VMAX["saliency"])
     )
+    learned_text = "text" in gate.models
     im_tex = theme.heat_axis(
-        fig.add_subplot(gs[0, 5]), "text", "cividis", (0, MAP_VMAX["texture"])
+        fig.add_subplot(gs[0, 5]),
+        "text  (fastdet model, p)" if learned_text else "text  (heuristic cue)",
+        "cividis",
+        (0, 1.0) if learned_text else (0, MAP_VMAX["texture"]),
     )
     # exact per-cell moment grids (autoscaled)
     im_luma = theme.heat_axis(fig.add_subplot(gs[1, 3]), "luma  (V mean)", "inferno")
@@ -264,6 +276,7 @@ def run(src, cfg=None):
             txt.set_text(
                 f"state      {state}\n"
                 f"shot       s{sid:<4d} group g{gid}\n"
+                f"models     {', '.join(gate.models) or 'none (heuristics)'}\n"
                 f"core (gate)  {t_core:6.2f} ms   median {med_core:6.2f}\n"
                 f"+ maps       {t_maps:6.2f} ms   median {med_full - med_core:6.2f}\n"
                 f"render       {last_render:6.2f} ms   (matplotlib, 1/{DRAW_EVERY} frames)\n"
@@ -312,9 +325,23 @@ def main(argv=None):
         help=f"imfeat worker threads (default {GateConfig().feat_threads}; "
         "the output is bit-identical at any count)",
     )
+    parser.add_argument(
+        "--model",
+        action="append",
+        default=[],
+        metavar="[NAME=]PATH",
+        help="a fastdet .fdt model to run on the gate's pass (repeatable); "
+        "NAME defaults to text, which replaces the heuristic text map",
+    )
     args = parser.parse_args(argv)
-    cfg = GateConfig(feat_threads=args.threads) if args.threads else None
-    run(args.video, cfg)
+    overrides = {}
+    if args.threads:
+        overrides["feat_threads"] = args.threads
+    if args.model:
+        overrides["models"] = dict(
+            m.split("=", 1) if "=" in m else ("text", m) for m in args.model
+        )
+    run(args.video, GateConfig(**overrides) if overrides else None)
 
 
 if __name__ == "__main__":

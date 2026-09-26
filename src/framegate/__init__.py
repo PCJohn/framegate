@@ -25,6 +25,7 @@ doing; shot_group_id is shared by recurrences of the same shot (re-identificatio
 
 from .config import GateConfig
 from .gate import Gate
+from .models import ModelBank
 from .publish import Packet, Publisher
 from .shotmem import Group, Shot, ShotMemory, ShotTracker
 from .stats import FrameGate, FrameStats
@@ -36,6 +37,7 @@ __all__ = [
     "Gate",
     "GateConfig",
     "Group",
+    "ModelBank",
     "Packet",
     "Publisher",
     "Shot",

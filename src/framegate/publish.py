@@ -79,8 +79,10 @@ class Publisher:
         return pkt
 
     def close(self) -> None:
-        """End of stream: close the final shot so it appears in `shots`. Idempotent."""
+        """End of stream: close the final shot so it appears in `shots`, and release
+        the gate (its threads are joined). Idempotent."""
         self._shots.close()
+        self._gate.close()
 
     @property
     def shots(self) -> list[Shot]:
