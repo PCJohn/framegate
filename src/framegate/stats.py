@@ -290,44 +290,74 @@ class FrameStats:
 
 
 class FrameGate:
-    """Per-frame extractor. Owns reusable buffers and one FeatureComputer; no
+    """Per-frame extractor. Owns reusable buffers and the FeatureComputers; no
     temporal state, so it works identically on a still image or a video frame.
     Accepts BGR (H,W,3) or grayscale (H,W)/(H,W,1) uint8 input. Not thread-safe
     (the scratch buffers are reused per call); use one FrameGate per stream.
 
-    Holds one imfeat worker pool of `cfg.feat_threads` threads, spawned here and
-    parked between frames, and the fastdet models the config names (models.py), which
-    score the same pass. One pool per FrameGate, so N streams mean N pools -- budget
-    against imfeat.cpu_count() if other real-time work shares the CPU. `close()` joins
-    the pools; call it before interpreter shutdown in long-running hosts."""
+    Holds imfeat worker pools of `cfg.feat_threads` threads, spawned here and parked
+    between frames, and the fastdet models the config names (models.py), which score
+    the same pass. A pool per FrameGate (two when both kinds of frame arrive, see
+    `process`), so N streams mean N pools -- budget against imfeat.cpu_count() if other
+    real-time work shares the CPU. `close()` joins the pools; call it before interpreter
+    shutdown in long-running hosts."""
 
     def __init__(self, cfg: GateConfig | None = None):
         self.cfg = cfg or GateConfig()
         t = self.cfg.thumb
         self._models = ModelBank(self.cfg)
-        # One extractor, one pass: moments AND structure, for every channel, on the
-        # same cells. imfeat computes every feature group for every channel, always,
-        # and converts the BGR thumbnail to HSV as it reads it (cv2.cvtColor's bytes,
-        # at a fraction of its cost, with no second image).
-        self._feat = imfeat.FeatureComputer(
-            shape=(t, t, 3),
-            grid=[(e, e) for e in self.cfg.pyramid_exps],
-            stride=self.cfg.stride,
-            threads=self.cfg.feat_threads,
-            input_space="bgr",
-            feature_space="hsv",
-        )
+        # One pass: moments AND structure, for every channel, on the same cells. imfeat
+        # computes every feature group for every channel, always, converts the BGR
+        # thumbnail to HSV as it reads it (cv2.cvtColor's bytes, at a fraction of its
+        # cost, with no second image) and, given the frame, makes the thumbnail itself
+        # inside the pass (cv2.resize(INTER_AREA)'s bytes, likewise). Two computers can
+        # exist, both built on first use: `_fused` takes a frame of the size last seen
+        # and resizes it inside its pass; `_feat` takes a ready thumbnail, for the frames
+        # cv2 has to resize (see _fuses).
+        self._fused: imfeat.FeatureComputer | None = None
+        self._fused_shape: tuple | None = None
+        self._feat: imfeat.FeatureComputer | None = None
+        self._closed = False
         self._bgr = np.empty(
             (t, t, 3), np.uint8
         )  # scratch reused when not returning frames
         self._gray = np.empty((t, t), np.uint8)
 
+    def _computer(
+        self, shape: tuple, thumb: tuple | None = None
+    ) -> imfeat.FeatureComputer:
+        return imfeat.FeatureComputer(
+            shape=shape,
+            grid=[(e, e) for e in self.cfg.pyramid_exps],
+            stride=self.cfg.stride,
+            threads=self.cfg.feat_threads,
+            input_space="bgr",
+            feature_space="hsv",
+            thumb=thumb,
+        )
+
+    def _fuses(self, frame: np.ndarray) -> bool:
+        """Whether imfeat thumbnails this frame inside its pass: a BGR frame at least the
+        thumbnail's size in both axes, with the "area" filter (imfeat's resize is
+        INTER_AREA, downscaling only). The rest -- grayscale, smaller frames (an upscale
+        is bilinear in OpenCV), "nearest" -- go through cv2.resize and the thumbnail
+        computer, with the same numbers out."""
+        t = self.cfg.thumb
+        return (
+            self.cfg.resize_interp == "area"
+            and frame.ndim == 3
+            and frame.shape[2] == 3
+            and frame.shape[0] >= t
+            and frame.shape[1] >= t
+        )
+
     def _thumbnail(self, frame: np.ndarray, keep: bool) -> tuple:
-        """Resize to the thumbnail (cfg.resize_interp): `(bgr, thumb)`, the (t, t, 3)
-        array imfeat converts and reads, and the thumbnail to hand back (BGR, or the
-        grayscale itself). A grayscale frame is replicated into the three channels, so
-        imfeat sees H=S=0, V=luma and colour signals correctly read as zero. With `keep`,
-        `thumb` is a fresh array the caller can hold; otherwise a reused scratch buffer.
+        """The cv2 path (see _fuses): resize to the thumbnail (cfg.resize_interp):
+        `(bgr, thumb)`, the (t, t, 3) array imfeat converts and reads, and the thumbnail
+        to hand back (BGR, or the grayscale itself). A grayscale frame is replicated into
+        the three channels, so imfeat sees H=S=0, V=luma and colour signals correctly read
+        as zero. With `keep`, `thumb` is a fresh array the caller can hold; otherwise a
+        reused scratch buffer.
         """
         t = self.cfg.thumb
         interp = _INTERP[self.cfg.resize_interp]
@@ -346,10 +376,26 @@ class FrameGate:
         return thumb, (thumb if keep else None)
 
     def process(self, frame: np.ndarray) -> FrameStats:
+        if self._closed:
+            raise RuntimeError("this FrameGate is closed")
         h, w = frame.shape[:2]
         keep = self.cfg.return_frames
-        bgr, thumb = self._thumbnail(frame, keep)
-        p = self._feat.features(bgr)
+        t = self.cfg.thumb
+        if self._fuses(frame):
+            if self._fused is None or self._fused_shape != frame.shape:
+                self._fused = self._computer(
+                    frame.shape, thumb=(t, t)
+                )  # a new frame size
+                self._fused_shape = frame.shape
+            thumb = np.empty((t, t, 3), np.uint8) if keep else None
+            fused: imfeat.FeatureComputer = self._fused
+            p = fused.features(frame, thumb_out=thumb)
+        else:
+            if self._feat is None:
+                self._feat = self._computer((t, t, 3))
+            bgr, thumb = self._thumbnail(frame, keep)
+            feat: imfeat.FeatureComputer = self._feat
+            p = feat.features(bgr)
         chan = p.moments[-1].astype(np.float32)  # the 1-cell global level is last
         grids = tuple(m.astype(np.float32) for m in p.moments[: self.cfg.n_levels])
         grid = grids[
@@ -406,9 +452,11 @@ class FrameGate:
         return self._models.names
 
     def close(self) -> None:
-        """Join the imfeat pool and the models' scorer threads. The gate is unusable
+        """Join the imfeat pools and the models' scorer threads. The gate is unusable
         afterwards. Python does this when the object dies, but do it explicitly before
         interpreter shutdown on Windows, where joining threads during DLL unload can
         stall the process."""
         self._models.close()
         self._feat = None
+        self._fused = None
+        self._closed = True

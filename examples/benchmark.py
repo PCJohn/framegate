@@ -121,33 +121,40 @@ def _cfg_items(specs, frames):
     return items
 
 
+PHASES = ("resize alone", "imfeat core (resize + pass)", "+ python wrap", "+ temporal")
+
+
 def _phases(cfg, frames):
     """Cumulative nested timings, so each row is a real measurement and the deltas are
-    differences of measurements rather than of separately-minimised sweeps. Reaches into
-    private attributes; returns None if the internals have moved."""
+    differences of measurements rather than of separately-minimised sweeps. The frame
+    goes into imfeat's pass whole (the thumbnail is made inside it), so the first row is
+    the resize on its own, for reference, and the second the pass that includes it.
+    Reaches into private attributes; returns None if the internals have moved."""
+    import imfeat
+
     g = Gate(cfg)
+    g.image(frames[0])  # builds the computer for this frame size
     try:
         fg = g._gate
-        fc, keep = fg._feat, fg.cfg.return_frames
-        bgr = fg._thumbnail(frames[0], keep)[0]
-        view = fc._view(bgr)
+        fc = fg._fused
+        thumb = fc.thumb
+        view = fc._view(frames[0])
+        nthreads = fg.cfg.feat_threads
     except AttributeError:
         return None
+    if fc is None:
+        return None  # this frame size goes through cv2 (see FrameGate._fuses)
     gf = Gate(cfg)
     return _bench_group(
         [
-            ("thumb", lambda f: fg._thumbnail(f, keep), frames),
-            (  # the pass, BGR -> HSV inside it
-                "+ imfeat core",
-                lambda f: (fg._thumbnail(f, keep), fc._impl.features(view)),
-                frames,
-            ),
             (
-                "+ python wrap",
-                lambda f: (fg._thumbnail(f, keep), fc.features(bgr)),
+                PHASES[0],
+                lambda f: imfeat.resize_area(f, thumb, threads=nthreads),
                 frames,
             ),
-            ("+ temporal", lambda f: gf.frame(f), frames),
+            (PHASES[1], lambda f: fc._impl.features(view, None), frames),
+            (PHASES[2], lambda f: fc.features(f), frames),
+            (PHASES[3], lambda f: gf.frame(f), frames),
         ]
     )
 
@@ -250,7 +257,7 @@ def run_synthetic():
         print("  (skipped: framegate internals have moved)")
     else:
         prev = 0.0
-        for label in ("thumb", "+ imfeat core", "+ python wrap", "+ temporal"):
+        for label in PHASES:
             mn = ph[label][0]
             print(
                 f"  {label:36s} {mn:6.3f} / {ph[label][1]:6.3f} ms   delta {mn - prev:+6.3f}"
@@ -395,10 +402,12 @@ def run_video(path):
     _header("where a frame goes (cumulative; deltas are between rows)", False)
     ph = _phases(GateConfig(), frames)
     if ph is None:
-        print("  (skipped: framegate internals have moved)")
+        print(
+            "  (skipped: framegate internals have moved, or this size is resized by cv2)"
+        )
     else:
         prev = 0.0
-        for label in ("thumb", "+ imfeat core", "+ python wrap", "+ temporal"):
+        for label in PHASES:
             mn = ph[label][0]
             print(
                 f"  {label:36s} {mn:6.3f} / {ph[label][1]:6.3f} ms   delta {mn - prev:+6.3f}"

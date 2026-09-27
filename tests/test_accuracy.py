@@ -163,7 +163,7 @@ def test_pass_on_bgr_equals_pass_on_cvtcolor_hsv():
     reads is byte for byte what a pass on the cvtColor'd thumbnail gives, so signals and
     models behave exactly as before the conversion moved. A grayscale frame likewise
     (H = S = 0, V = luma)."""
-    import imfeat
+    import imfeat  # type: ignore[import-untyped]
 
     from framegate import signals as S
 
@@ -186,6 +186,67 @@ def test_pass_on_bgr_equals_pass_on_cvtcolor_hsv():
             *want.maps[0].shape[:2], 3, len(imfeat.FEATURE_NAMES)
         )
         assert np.array_equal(fs.struct["grid_0"], fine[:, :, S.CH_V, S.SE])
+
+
+def test_pass_on_frame_equals_pass_on_cv2_thumbnail():
+    """imfeat thumbnails a frame inside the gate's pass (cv2.resize(INTER_AREA)'s bytes);
+    every number the gate reads, and the thumbnail it hands back, are byte for byte what
+    cv2.resize followed by the pass on the thumbnail gives. Frames cv2 has to resize --
+    smaller than the thumbnail in an axis (bilinear in OpenCV), grayscale, "nearest" --
+    still come out that way, and a change of frame size mid-stream is fine."""
+    import cv2
+    import imfeat
+
+    from framegate import signals as S
+
+    def check(gate, frame, interp):
+        cfg = gate.cfg
+        as_is = imfeat.FeatureComputer(
+            shape=(cfg.thumb, cfg.thumb, 3),
+            grid=[(e, e) for e in cfg.pyramid_exps],
+            stride=cfg.stride,
+            feature_space=None,
+        )
+        fs = gate.image(frame)
+        small = cv2.resize(frame, (cfg.thumb, cfg.thumb), interpolation=interp)
+        if small.ndim == 2:  # a grayscale frame: H = S = 0, V = luma
+            assert np.array_equal(fs.thumb, small)
+            small = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
+        else:
+            assert np.array_equal(fs.thumb, small)
+        want = as_is.features(cv2.cvtColor(small, cv2.COLOR_BGR2HSV))
+        assert np.array_equal(fs.chan, want.moments[-1].astype(np.float32))
+        for grid, level in zip(fs.grids, want.moments[: cfg.n_levels], strict=True):
+            assert np.array_equal(grid, level.astype(np.float32))
+        assert fs.phash == int(want.hashes[imfeat.HASHES.index("phash"), S.CH_V])
+        fine = want.maps[0].reshape(
+            *want.maps[0].shape[:2], 3, len(imfeat.FEATURE_NAMES)
+        )
+        assert np.array_equal(fs.struct["grid_0"], fine[:, :, S.CH_V, S.SE])
+        assert np.array_equal(
+            fs.struct["global"], want.maps[-1].reshape(3, -1)[S.CH_V, S.SE]
+        )
+
+    rng = np.random.default_rng(5)
+    yy, xx = np.mgrid[0:1080, 0:1920]
+    frames = [
+        rng.integers(
+            0, 256, (1080, 1920, 3), dtype=np.uint8
+        ),  # fused: the frame goes in
+        np.stack(
+            [xx * 255 // 1919, yy * 255 // 1079, ((xx // 7 + yy // 5) % 2) * 255], -1
+        ).astype(np.uint8),
+        rng.integers(0, 256, (1440, 2560, 3), dtype=np.uint8),  # another size: rebuilt
+        rng.integers(0, 256, (720, 1280, 3), dtype=np.uint8),  # cv2: an upscale
+        rng.integers(0, 256, (1080, 1920), dtype=np.uint8),  # cv2: grayscale
+        rng.integers(0, 256, (1080, 1920, 3), dtype=np.uint8),  # fused again
+    ]
+    gate = Gate(GateConfig(feat_threads=2))
+    for frame in frames:
+        check(gate, frame, cv2.INTER_AREA)
+    gate = Gate(GateConfig(resize_interp="nearest"))  # cv2 throughout
+    for frame in frames[:1] + frames[3:4]:
+        check(gate, frame, cv2.INTER_NEAREST)
 
 
 def test_fast_static_matches_full_search_on_cuts():

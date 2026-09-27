@@ -38,9 +38,9 @@ class GateConfig:
     # The thumbnail, its resize filter and the stride are fastdet's front-end exactly
     # (Detector.front_end_spec), so one imfeat pass can feed both the gate and a fastdet
     # model. The cheaper, coarser operating point is stride=4, resize_interp="nearest".
-    thumb: int = 1024  # thumbnail side for stats
+    thumb: int = 1024  # thumbnail side for stats (made inside imfeat's pass)
     resize_interp: str = (
-        "area"  # thumbnail filter: "area" (box, like fastdet) or "nearest"
+        "area"  # thumbnail filter: "area" (box, like fastdet) or "nearest" (cv2)
     )
     stride: int = 1  # grid stride; >1 = indexed-gather over a subsample
     feat_threads: int = 2  # imfeat worker threads; output is bit-identical at any count

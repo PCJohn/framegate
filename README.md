@@ -100,9 +100,10 @@ only on access.
 **Under the hood.** Every signal is derived from **exact per-cell central moments**
 (mean, variance, and two higher moments) of the H/S/V channels, computed over a
 `thumb`x`thumb` thumbnail in a single pass by
-[`imfeat`](https://github.com/PCJohn/imfeat) -- which, in that same pass and on the same
-cells, also computes the gradient structure tensor, an orientation histogram and extrema
-densities, for *every* channel. The thumbnail is divided into a
+[`imfeat`](https://github.com/PCJohn/imfeat) -- which makes that thumbnail from the frame
+and converts it to HSV inside the pass, and, on the same cells, also computes the
+gradient structure tensor, an orientation histogram and extrema densities, for *every*
+channel. The thumbnail is divided into a
 `GxG` grid of cells (`G = 2**grid_exp`, default 64); each cell's moments summarize its
 colour and texture, and the signals are cheap combinations of them. The grid is also
 computed at several coarser resolutions in the *same* pass -- a dyadic **pyramid** of
@@ -382,14 +383,14 @@ back to source pixels.
 
 ### Reused frames
 
-The gate already resizes the input (`cfg.resize_interp`, a box filter by default); the
-HSV conversion happens inside imfeat's pass, as it reads the thumbnail (bit for bit
-`cv2.cvtColor`'s bytes, at a fraction of its cost, and no second image). With
-`return_frames` (default on), it hands the thumbnail back on `FrameStats.thumb` (the
-resized BGR — or single-channel grayscale — input, at `cfg.thumb` resolution), so a
-driver doing `read → gate → heavy_pipeline` can reuse it instead of recomputing;
-`FrameStats.hsv` is that thumbnail in HSV, made on first access. Both are `None` when
-the flag is off.
+The gate resizes the input to the thumbnail (`cfg.resize_interp`, a box filter by
+default) and converts it to HSV, both inside imfeat's pass as it reads the frame (bit for
+bit `cv2.resize(INTER_AREA)`'s and `cv2.cvtColor`'s bytes, at a fraction of their cost,
+and no intermediate image). With `return_frames` (default on), it hands the thumbnail
+back on `FrameStats.thumb` (the resized BGR — or single-channel grayscale — input, at
+`cfg.thumb` resolution, written out by the pass), so a driver doing `read → gate →
+heavy_pipeline` can reuse it instead of recomputing; `FrameStats.hsv` is that thumbnail
+in HSV, made on first access. Both are `None` when the flag is off.
 
 ## Output format
 
@@ -443,10 +444,11 @@ samples, or `GateConfig(thumb=256, stride=2, grid_exp=5, n_levels=4)` for the ol
 What moves the number:
 
 - **`thumb` dominates** — it sets the pixel work and scales ~quadratically with it. First
-  knob to reach for. It also sets the thumbnailing cost, which is proportional to *output*
-  pixels rather than input, so a 4K source costs the same to thumbnail as a 720p one.
-- **Input resolution barely matters** for `image()`: everything is resized to `thumb` first,
-  so there is no need to pre-downscale.
+  knob to reach for.
+- **Input resolution matters only through the resize.** Everything is resized to `thumb`
+  first, inside imfeat's pass, and the box filter reads every source pixel: a 4K frame
+  costs about twice a 1080p one to thumbnail, and nothing more after that. No need to
+  pre-downscale.
 - **`feat_threads` is the main parallel lever.** imfeat splits its accumulate pass into
   disjoint bands of cell rows and the output is bit-identical at any thread count. 2 is a
   reasonable default when other work shares the machine, 4 when it does not.
@@ -458,11 +460,14 @@ What moves the number:
   structure maps degrade fast (at 4 samples/cell the edge-energy map correlates only ~0.82
   with the exact one).
 - **`resize_interp`** is the thumbnail filter. `"area"` (default) is the box filter
-  fastdet's models are trained on, and OpenCV's general-ratio box filter is its slow path:
-  on a 1080p frame it measured ~12 ms on one thread here against 0.8 ms for `"nearest"`
-  (4K: 30 ms), spread over OpenCV's own thread pool when it has one; integer ratios and
-  upscaling take a fast path (~1 ms). It is the price of the shared front-end; a cheaper
-  filter has to change on fastdet's training side too.
+  fastdet's models are trained on. A BGR frame at least `thumb` px in both axes is handed
+  to imfeat whole, which makes the thumbnail inside its pass, per band, with exactly the
+  bytes `cv2.resize(INTER_AREA)` gives and at a fraction of its cost: on the 22-thread
+  laptop a 1080p frame's resize is 0.5 ms inside a two-thread pass (0.4 ms on four),
+  against 2–3 ms for `cv2.resize` on OpenCV's 22-thread pool (7 ms on one thread); on the
+  2-core VM 2.1 ms against 6.6. Frames smaller than the thumbnail in an axis (an upscale,
+  which OpenCV does bilinearly), grayscale frames and `"nearest"` still go through
+  `cv2.resize`, with the same numbers out either way.
 
 `stride`, `thumb` and `grid_exp` interact: what `stride` costs is samples per cell, so the
 binding constraint is `cell_px / stride >= 4` where `cell_px = thumb / 2**grid_exp`.
