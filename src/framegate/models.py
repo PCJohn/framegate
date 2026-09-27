@@ -60,6 +60,7 @@ def check_front_end(name: str, path: Path, spec: dict, cfg: GateConfig) -> None:
         "stride": cfg.stride,
         "resize_interp": cfg.resize_interp,
         "space": "hsv",
+        "input_space": "bgr",  # the gate hands imfeat the BGR thumbnail; imfeat converts
         "levels": [2**e for e in cfg.pyramid_exps],
         "extra_scales": [],
     }

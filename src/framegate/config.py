@@ -125,7 +125,8 @@ class GateConfig:
     models: dict = field(default_factory=dict)
 
     # --- output ---
-    return_frames: bool = True  # attach thumb+HSV to FrameStats for caller reuse
+    # attach the thumbnail to FrameStats for caller reuse (its HSV, made on demand)
+    return_frames: bool = True
 
     # --- video-level optimization ---
     skip_duplicates: bool = True  # reuse stats for byte-identical consecutive frames

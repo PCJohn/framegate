@@ -129,22 +129,22 @@ def _phases(cfg, frames):
     try:
         fg = g._gate
         fc, keep = fg._feat, fg.cfg.return_frames
-        hsv = fg._to_hsv(frames[0], keep)[0]
-        view = fc._view(hsv)
+        bgr = fg._thumbnail(frames[0], keep)[0]
+        view = fc._view(bgr)
     except AttributeError:
         return None
     gf = Gate(cfg)
     return _bench_group(
         [
-            ("thumb", lambda f: fg._to_hsv(f, keep), frames),
-            (
+            ("thumb", lambda f: fg._thumbnail(f, keep), frames),
+            (  # the pass, BGR -> HSV inside it
                 "+ imfeat core",
-                lambda f: (fg._to_hsv(f, keep), fc._impl.features(view)),
+                lambda f: (fg._thumbnail(f, keep), fc._impl.features(view)),
                 frames,
             ),
             (
                 "+ python wrap",
-                lambda f: (fg._to_hsv(f, keep), fc.features(hsv)),
+                lambda f: (fg._thumbnail(f, keep), fc.features(bgr)),
                 frames,
             ),
             ("+ temporal", lambda f: gf.frame(f), frames),

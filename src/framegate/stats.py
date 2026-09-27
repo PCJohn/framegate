@@ -14,6 +14,16 @@ from . import signals as S
 from .config import GateConfig
 from .models import ModelBank
 
+# The gate hands imfeat the BGR thumbnail and lets it convert to HSV inside its pass
+# (FeatureComputer's input_space / feature_space, which came with imfeat.COLOR_SPACES).
+# An imfeat without that would take the thumbnail as HSV and every signal would be
+# wrong, so it is refused here rather than found in the maps.
+if not hasattr(imfeat, "COLOR_SPACES"):
+    raise ImportError(
+        "framegate needs an imfeat that converts BGR to HSV inside its pass "
+        "(pip install git+https://github.com/PCJohn/imfeat)"
+    )
+
 _F = len(imfeat.FEATURE_NAMES)  # 38 features per channel in a pyramid map
 _C = 3  # HSV
 _INTERP = {"area": cv2.INTER_AREA, "nearest": cv2.INTER_NEAREST}  # cfg.resize_interp
@@ -35,7 +45,6 @@ class FrameStats:
         tuple
     ) = ()  # pyramid levels finest->coarsest, each (G_k, G_k, C, 4); grids[0] is grid
     thumb: np.ndarray | None = None  # resized input (BGR or gray), if cfg.return_frames
-    hsv: np.ndarray | None = None  # its HSV, if cfg.return_frames
     residual: np.ndarray | None = (
         None  # (G,G) photometric change vs the previous frame;
     )
@@ -50,6 +59,21 @@ class FrameStats:
     model_maps: dict = field(
         default_factory=dict
     )  # name -> (G,G) float32 probabilities from the fastdet models loaded (models.py)
+
+    @cached_property
+    def hsv(self) -> np.ndarray | None:
+        """The thumbnail in HSV, if cfg.return_frames: what the signals were computed on.
+
+        Made on first access, from `thumb`: imfeat converts inside the gate's pass now,
+        so there is no HSV image to hand back unless asked for. `imfeat.convert` gives
+        cv2.cvtColor's bytes; a grayscale thumbnail becomes H = S = 0, V = luma."""
+        if self.thumb is None:
+            return None
+        if self.thumb.ndim == 2:
+            hsv = np.zeros((*self.thumb.shape, 3), np.uint8)
+            hsv[:, :, 2] = self.thumb
+            return hsv
+        return imfeat.convert(self.thumb)
 
     # --- per-channel grids (views; raw moments) ---
     @property
@@ -282,27 +306,31 @@ class FrameGate:
         t = self.cfg.thumb
         self._models = ModelBank(self.cfg)
         # One extractor, one pass: moments AND structure, for every channel, on the
-        # same cells. imfeat computes every feature group for every channel, always.
+        # same cells. imfeat computes every feature group for every channel, always,
+        # and converts the BGR thumbnail to HSV as it reads it (cv2.cvtColor's bytes,
+        # at a fraction of its cost, with no second image).
         self._feat = imfeat.FeatureComputer(
             shape=(t, t, 3),
             grid=[(e, e) for e in self.cfg.pyramid_exps],
             stride=self.cfg.stride,
             threads=self.cfg.feat_threads,
+            input_space="bgr",
+            feature_space="hsv",
         )
         self._bgr = np.empty(
             (t, t, 3), np.uint8
         )  # scratch reused when not returning frames
         self._gray = np.empty((t, t), np.uint8)
-        self._hsv = np.empty((t, t, 3), np.uint8)
 
-    def _to_hsv(self, frame: np.ndarray, keep: bool) -> tuple:
-        """Resize to the thumbnail (cfg.resize_interp) and produce HSV. Grayscale
-        becomes H=S=0, V=luma, so colour signals correctly read as zero. With `keep`,
-        outputs are fresh arrays the caller can hold; otherwise reused scratch buffers.
+    def _thumbnail(self, frame: np.ndarray, keep: bool) -> tuple:
+        """Resize to the thumbnail (cfg.resize_interp): `(bgr, thumb)`, the (t, t, 3)
+        array imfeat converts and reads, and the thumbnail to hand back (BGR, or the
+        grayscale itself). A grayscale frame is replicated into the three channels, so
+        imfeat sees H=S=0, V=luma and colour signals correctly read as zero. With `keep`,
+        `thumb` is a fresh array the caller can hold; otherwise a reused scratch buffer.
         """
         t = self.cfg.thumb
         interp = _INTERP[self.cfg.resize_interp]
-        hsv = np.empty((t, t, 3), np.uint8) if keep else self._hsv
         if frame.ndim == 2 or frame.shape[2] == 1:
             thumb = np.empty((t, t), np.uint8) if keep else self._gray
             cv2.resize(
@@ -311,19 +339,17 @@ class FrameGate:
                 dst=thumb,
                 interpolation=interp,
             )
-            hsv[:, :, :2] = 0
-            hsv[:, :, 2] = thumb
-        else:
-            thumb = np.empty((t, t, 3), np.uint8) if keep else self._bgr
-            cv2.resize(frame, (t, t), dst=thumb, interpolation=interp)
-            cv2.cvtColor(thumb, cv2.COLOR_BGR2HSV, dst=hsv)
-        return hsv, (thumb if keep else None)
+            cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR, dst=self._bgr)
+            return self._bgr, (thumb if keep else None)
+        thumb = np.empty((t, t, 3), np.uint8) if keep else self._bgr
+        cv2.resize(frame, (t, t), dst=thumb, interpolation=interp)
+        return thumb, (thumb if keep else None)
 
     def process(self, frame: np.ndarray) -> FrameStats:
         h, w = frame.shape[:2]
         keep = self.cfg.return_frames
-        hsv, thumb = self._to_hsv(frame, keep)
-        p = self._feat.features(hsv)
+        bgr, thumb = self._thumbnail(frame, keep)
+        p = self._feat.features(bgr)
         chan = p.moments[-1].astype(np.float32)  # the 1-cell global level is last
         grids = tuple(m.astype(np.float32) for m in p.moments[: self.cfg.n_levels])
         grid = grids[
@@ -367,7 +393,6 @@ class FrameGate:
             shape=(h, w),
             cfg=self.cfg,
             thumb=thumb,
-            hsv=hsv if keep else None,
             struct=struct,
             phash=int(
                 p.hashes[imfeat.HASHES.index("phash"), S.CH_V]

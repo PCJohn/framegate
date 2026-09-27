@@ -140,17 +140,52 @@ def test_duplicate_skip_is_lossless():
 
 
 def test_return_frames_default_on_and_toggleable():
+    import cv2
+
     t = GateConfig().thumb
     fs = Gate().image(synth.hsv_scene(60, 2))
     assert fs.thumb.shape == (t, t, 3) and fs.hsv.shape == (t, t, 3)
+    # hsv is made from the thumbnail on demand: cvtColor's bytes
+    assert np.array_equal(fs.hsv, cv2.cvtColor(fs.thumb, cv2.COLOR_BGR2HSV))
     g = Gate().image(synth.grayscale_scene(2))
     assert g.thumb.shape == (t, t) and g.hsv.shape == (
         t,
         t,
         3,
     )  # grayscale thumb is 1-channel
+    assert not g.hsv[:, :, :2].any() and np.array_equal(g.hsv[:, :, 2], g.thumb)
     off = Gate(GateConfig(return_frames=False)).image(synth.hsv_scene(60, 2))
     assert off.thumb is None and off.hsv is None
+
+
+def test_pass_on_bgr_equals_pass_on_cvtcolor_hsv():
+    """imfeat converts the thumbnail to HSV inside the gate's pass; every number the gate
+    reads is byte for byte what a pass on the cvtColor'd thumbnail gives, so signals and
+    models behave exactly as before the conversion moved. A grayscale frame likewise
+    (H = S = 0, V = luma)."""
+    import imfeat
+
+    from framegate import signals as S
+
+    cfg = GateConfig()
+    gate = Gate(cfg)
+    as_is = imfeat.FeatureComputer(
+        shape=(cfg.thumb, cfg.thumb, 3),
+        grid=[(e, e) for e in cfg.pyramid_exps],
+        stride=cfg.stride,
+        feature_space=None,
+    )
+    for frame in (synth.noisy(synth.hsv_scene(60, 2)), synth.grayscale_scene(2)):
+        fs = gate.image(frame)
+        want = as_is.features(fs.hsv)  # the old path: cvtColor first, imfeat on HSV
+        assert np.array_equal(fs.chan, want.moments[-1].astype(np.float32))
+        for grid, level in zip(fs.grids, want.moments[: cfg.n_levels], strict=True):
+            assert np.array_equal(grid, level.astype(np.float32))
+        assert fs.phash == int(want.hashes[imfeat.HASHES.index("phash"), S.CH_V])
+        fine = want.maps[0].reshape(
+            *want.maps[0].shape[:2], 3, len(imfeat.FEATURE_NAMES)
+        )
+        assert np.array_equal(fs.struct["grid_0"], fine[:, :, S.CH_V, S.SE])
 
 
 def test_fast_static_matches_full_search_on_cuts():

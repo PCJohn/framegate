@@ -129,8 +129,8 @@ and when it says to.
    - `sig.freeze` -> reuse the previous heavy result; the frame didn't change.
    - otherwise -> run your model, optionally only on high-`saliency` / high-`motion` cells.
 3. **Reuse the work the gate already did.** With `return_frames=True` (default) the resized
-   thumbnail and HSV are on `stats.thumb` / `stats.hsv` -- pass them downstream instead of
-   resizing again. Set it `False` if you don't, to save the copy.
+   thumbnail is on `stats.thumb` (and its HSV on `stats.hsv`, made on first access) -- pass
+   it downstream instead of resizing again. Set it `False` if you don't, to save the copy.
 4. **For steady latency, disable the GC around your loop.** GC pauses -- not framegate --
    are the main source of latency *spikes*; `gc.disable()` plus a periodic `gc.collect()`
    flattens the tail.
@@ -323,7 +323,8 @@ over these statistics, trained elsewhere and scored on the gate's own pass.
 
 [fastdet](https://github.com/PCJohn/fastdet) trains a per-cell tree model on the same
 imfeat pyramid the gate computes -- its front-end *is* the default `GateConfig` (1024-px
-box-filtered thumbnail, HSV, stride 1, the 64..2 grid pyramid) -- and ships it as one
+box-filtered BGR thumbnail, converted to HSV inside imfeat's pass, stride 1, the 64..2 grid
+pyramid) -- and ships it as one
 small `.fdt` file. The gate runs such models on the pass it already makes, so a model
 adds only its scorer (well under a millisecond on a couple of threads) per frame:
 
@@ -381,12 +382,14 @@ back to source pixels.
 
 ### Reused frames
 
-The gate already resizes the input (`cfg.resize_interp`, a box filter by default) and
-converts it to HSV. With `return_frames` (default on), it hands those back on
-`FrameStats.thumb` (the resized BGR — or single-channel grayscale — input) and
-`FrameStats.hsv`, both at `cfg.thumb` resolution, so a driver doing
-`read → gate → heavy_pipeline` can reuse them instead of recomputing. They are `None`
-when the flag is off.
+The gate already resizes the input (`cfg.resize_interp`, a box filter by default); the
+HSV conversion happens inside imfeat's pass, as it reads the thumbnail (bit for bit
+`cv2.cvtColor`'s bytes, at a fraction of its cost, and no second image). With
+`return_frames` (default on), it hands the thumbnail back on `FrameStats.thumb` (the
+resized BGR — or single-channel grayscale — input, at `cfg.thumb` resolution), so a
+driver doing `read → gate → heavy_pipeline` can reuse it instead of recomputing;
+`FrameStats.hsv` is that thumbnail in HSV, made on first access. Both are `None` when
+the flag is off.
 
 ## Output format
 
@@ -494,8 +497,8 @@ Practical levers, fastest path to a smaller number first:
 - **Trim `n_levels`** to what your signals actually consume; every extra level is scatter
   work on every pixel.
 - **Set `return_frames=False`** if you never read `fs.thumb` / `fs.hsv`. The default
-  attaches fresh thumbnail + HSV arrays to every `FrameStats` (two allocations/frame, ~384
-  KB at `thumb=256`); turning it off reuses internal scratch and cuts that allocation.
+  attaches a fresh thumbnail to every `FrameStats` (one allocation/frame, ~192 KB at
+  `thumb=256`); turning it off reuses internal scratch and cuts that allocation.
 - **Leave `skip_duplicates=True`** (default). Byte-identical consecutive frames reuse the
   previous result behind a cheap strided pre-check — near-free on slideshows, padded streams,
   or held frames.
