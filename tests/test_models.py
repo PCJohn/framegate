@@ -143,9 +143,12 @@ def test_front_end_mismatch_is_refused(model_file):
         Gate(GateConfig(stride=2, models={"text": str(model_file)}))
     with pytest.raises(ValueError, match="resize_interp"):
         Gate(GateConfig(resize_interp="nearest", models={"text": str(model_file)}))
-    # the model records fastdet's default thumbnail rule ("pow2"): a fixed square is not it
-    with pytest.raises(ValueError, match="thumb: model 'pow2' vs gate 1024"):
+    # the model records fastdet's default thumbnail rule ("pow2-fit"): a fixed square, or
+    # another rule, is not it
+    with pytest.raises(ValueError, match="thumb: model 'pow2-fit' vs gate 1024"):
         Gate(GateConfig(thumb=1024, models={"text": str(model_file)}))
+    with pytest.raises(ValueError, match="thumb: model 'pow2-fit' vs gate 'pow2'"):
+        Gate(GateConfig(thumb="pow2", models={"text": str(model_file)}))
 
 
 def test_model_follows_the_frame_size(model_file):
@@ -153,12 +156,13 @@ def test_model_follows_the_frame_size(model_file):
     frame: the gate's map still equals fastdet's own on frames of several sizes."""
     gate = Gate(GateConfig(models={"text": str(model_file)}))
     det = fastdet.Detector.load(model_file)
-    assert det.front_end_spec["thumb"] == "pow2" == gate._gate.cfg.thumb
+    assert det.front_end_spec["thumb"] == "pow2-fit" == gate._gate.cfg.thumb
     rng = np.random.default_rng(4)
     for shape, size in (
-        ((720, 1280, 3), (512, 512)),
-        ((300, 500, 3), (256, 256)),
-        ((1080, 1920, 3), (1024, 1024)),
+        ((720, 1280, 3), (320, 512)),
+        ((300, 500, 3), (128, 256)),
+        ((1080, 1920, 3), (576, 1024)),
+        ((1920, 1080, 3), (1024, 576)),
     ):
         frame = rng.integers(0, 256, shape, dtype=np.uint8)
         assert gate._gate.cfg.thumb_hw(frame.shape) == size

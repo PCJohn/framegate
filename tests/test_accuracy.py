@@ -196,8 +196,9 @@ def test_pass_on_frame_equals_pass_on_cv2_thumbnail():
     cv2.resize followed by the pass on the thumbnail gives. Frames cv2 has to resize --
     smaller than the thumbnail in an axis (bilinear in OpenCV), grayscale, "nearest" --
     still come out that way, and a change of frame size mid-stream is fine. Under the
-    default policy the thumbnail's size follows the frame (1080p and 1440p: 1024, 720p:
-    512); with a fixed square every frame is resized to it."""
+    default policy the thumbnail's size follows the frame and keeps its shape (1080p and
+    1440p: 1024x576, 720p: 512x320); under "pow2" it is the shorter side's square
+    (1024, 1024 and 512); with a fixed square every frame is resized to it."""
     import cv2
     import imfeat
 
@@ -244,16 +245,25 @@ def test_pass_on_frame_equals_pass_on_cv2_thumbnail():
             [xx * 255 // 1919, yy * 255 // 1079, ((xx // 7 + yy // 5) % 2) * 255], -1
         ).astype(np.uint8),
         rng.integers(0, 256, (1440, 2560, 3), dtype=np.uint8),  # another size: rebuilt
-        rng.integers(0, 256, (720, 1280, 3), dtype=np.uint8),  # 512 by policy; cv2 up
+        rng.integers(
+            0, 256, (720, 1280, 3), dtype=np.uint8
+        ),  # by policy; fixed: cv2 up
         rng.integers(0, 256, (1080, 1920), dtype=np.uint8),  # cv2: grayscale
         rng.integers(0, 256, (1080, 1920, 3), dtype=np.uint8),  # fused again
         rng.integers(0, 256, (40, 50, 3), dtype=np.uint8),  # under the grid: cv2 up
     ]
-    sizes = [(1024, 1024)] * 2 + [(1024, 1024), (512, 512), (1024, 1024)] * 1
-    sizes += [(1024, 1024), (64, 64)]
-    gate = Gate(GateConfig(feat_threads=2))  # the "pow2" policy
-    assert gate._gate.cfg.thumb == "pow2"
-    for frame, size in zip(frames, sizes, strict=True):
+    fit = [(576, 1024)] * 2 + [(576, 1024), (320, 512), (576, 1024), (576, 1024)]
+    fit += [(64, 64)]
+    gate = Gate(GateConfig(feat_threads=2))  # the default, "pow2-fit"
+    assert gate._gate.cfg.thumb == "pow2-fit"
+    for frame, size in zip(frames, fit, strict=True):
+        check(gate, frame, cv2.INTER_AREA, size)
+        assert gate._gate._fuses(frame) == (
+            frame.ndim == 3 and min(frame.shape[:2]) >= 64
+        )
+    square = [(1024, 1024)] * 3 + [(512, 512), (1024, 1024), (1024, 1024), (64, 64)]
+    gate = Gate(GateConfig(feat_threads=2, thumb="pow2"))  # the shorter side's square
+    for frame, size in zip(frames, square, strict=True):
         check(gate, frame, cv2.INTER_AREA, size)
         assert gate._gate._fuses(frame) == (
             frame.ndim == 3 and min(frame.shape[:2]) >= 64

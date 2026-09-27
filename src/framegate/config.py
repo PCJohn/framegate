@@ -40,12 +40,20 @@ class GateConfig:
     # (Detector.front_end_spec), so one imfeat pass can feed both the gate and a fastdet
     # model. The cheaper, coarser operating point is stride=4, resize_interp="nearest".
     # thumb is a side in pixels (a square every frame is resized to, smaller ones
-    # upscaled) or an imfeat policy name that sizes it from the frame: "pow2" is the
-    # largest power of two the shorter side holds, square, never an upscale (720p -> 512,
-    # 1080p -> 1024, 4K -> 2048), floored at the grid (a frame under 64 px is upscaled to
-    # it as a fixed size would). thumb_hw(shape) gives a frame's size; the stride is capped
-    # at the cell side there so no cell of a small frame goes unsampled.
-    thumb: int | str = "pow2"  # thumbnail for stats (made inside imfeat's pass)
+    # upscaled) or an imfeat policy name that sizes it from the frame, never an upscale.
+    # All start from the square of the shorter side's power of two: "pow2" is that square
+    # (720p -> 512, 1080p -> 1024, 4K -> 2048); "pow2-fit" keeps the frame's shape inside
+    # it, the longer side the power of two (720p -> 512x320, 1080p -> 1024x576, 4K ->
+    # 2048x1152), never more pixels than the square and cells a power of two wide, which
+    # imfeat's pass is fastest at -- the cheapest rule; "pow2-cover" keeps the shape
+    # around the square (720p -> 896x512), the dearest. The aspect policies keep the
+    # shape only as closely as the grid allows: the scaled side is rounded to a multiple
+    # of 64, so 16:9 is exact at widths 1024 and 2048 but 1.6:1 at 512, and a banner too
+    # thin for that rounding gets the square. All are floored at the grid (a frame under
+    # 64 px is upscaled to it as a fixed size would). thumb_hw(shape) gives a frame's
+    # size; the stride is capped at the cell side there so no cell of a small frame goes
+    # unsampled.
+    thumb: int | str = "pow2-fit"  # thumbnail for stats (made inside imfeat's pass)
     resize_interp: str = (
         "area"  # thumbnail filter: "area" (box, like fastdet) or "nearest" (cv2)
     )
@@ -162,7 +170,8 @@ class GateConfig:
 
     def thumb_hw(self, shape: tuple) -> tuple:
         """The (rows, cols) thumbnail a frame of `shape` ((H, W) or (H, W, C)) gets: the
-        fixed square, or the policy's size floored at the grid."""
+        fixed square, or the policy's size floored at the grid. fastdet's
+        features.thumb_hw is the same rule."""
         rows, cols = imfeat.thumb_size(shape[:2], self.thumb)
         if isinstance(self.thumb, str):
             g = self.grid_size
@@ -177,9 +186,11 @@ class GateConfig:
         return max(1, min(self.stride, min(size) // self.grid_size))
 
     def samples_per_cell_for(self, shape: tuple) -> int:
-        """Sampled pixels per finest cell, per dimension, on a frame of `shape`: what the
-        stride costs. Four is the practical floor for the moment and histogram features
-        to carry information; the default (stride 1) has 16 at 1024 px, 8 at 512."""
+        """Sampled pixels per finest cell, per dimension (the shorter one, off a square),
+        on a frame of `shape`: what the stride costs. Four is the practical floor for the
+        moment and histogram features to carry information; the default (stride 1) has 9
+        on a 1080p frame's 1024x576 thumbnail, 5 on 720p's 512x320, 18 on 4K's 2048x1152.
+        """
         size = self.thumb_hw(shape)
         return (min(size) // self.grid_size) // self.stride_for(size)
 

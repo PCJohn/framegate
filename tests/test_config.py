@@ -56,20 +56,33 @@ def test_thumb_is_a_side_or_a_policy(tmp_path):
     """The default thumbnail follows the frame ("pow2"); a side in pixels is a fixed
     square; the size, the stride cap and the samples per cell come from the shape."""
     cfg = GateConfig()
-    assert cfg.thumb == "pow2"
-    assert cfg.thumb_hw((720, 1280, 3)) == (512, 512)
-    assert cfg.thumb_hw((1080, 1920)) == (1024, 1024)
-    assert cfg.thumb_hw((2160, 3840, 3)) == (2048, 2048)
+    assert cfg.thumb == "pow2-fit"
+    assert cfg.thumb_hw((720, 1280, 3)) == (
+        320,
+        512,
+    )  # 288 rows wanted: 1.6:1 is nearest
+    assert cfg.thumb_hw((1080, 1920)) == (576, 1024)
+    assert cfg.thumb_hw((1440, 2560, 3)) == (576, 1024)
+    assert cfg.thumb_hw((1920, 1080, 3)) == (1024, 576)  # portrait
+    assert cfg.thumb_hw((2160, 3840, 3)) == (1152, 2048)
     assert cfg.thumb_hw((40, 50, 3)) == (64, 64)  # floored at the grid
-    assert cfg.samples_per_cell_for((1080, 1920, 3)) == 16
-    assert cfg.samples_per_cell_for((720, 1280, 3)) == 8
-    assert cfg.samples_per_cell == 16  # a 1080p frame's, under a policy
+    assert cfg.thumb_hw((60, 2000, 3)) == (64, 64)  # a banner: the shape gives way
+    assert cfg.samples_per_cell_for((1080, 1920, 3)) == 9
+    assert cfg.samples_per_cell_for((720, 1280, 3)) == 5
+    assert cfg.samples_per_cell_for((2160, 3840, 3)) == 18
+    assert cfg.samples_per_cell == 9  # a 1080p frame's, under a policy
+    square = GateConfig(thumb="pow2")
+    assert square.thumb_hw((720, 1280, 3)) == (512, 512)
+    assert square.thumb_hw((1080, 1920)) == (1024, 1024)
+    assert square.samples_per_cell_for((720, 1280, 3)) == 8
     fixed = GateConfig(thumb=1024)
     assert fixed.thumb_hw((720, 1280, 3)) == (1024, 1024)  # a fixed square, upscaled
     assert fixed.samples_per_cell == 16 == fixed.samples_per_cell_for((720, 1280, 3))
     coarse = GateConfig(stride=4)
     assert coarse.stride_for((1024, 1024)) == 4
     assert coarse.stride_for((128, 128)) == 2  # capped at the 2 px cell
+    assert coarse.stride_for((576, 1024)) == 4
+    assert coarse.stride_for((128, 256)) == 2  # the shorter side's cell
     assert coarse.samples_per_cell_for((240, 420, 3)) == 1
     for bad in ("pow4", "", 0, True, 2.5):
         with pytest.raises(ValueError, match="thumb="):
