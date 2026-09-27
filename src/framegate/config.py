@@ -15,6 +15,7 @@ uses the defaults, and ``to_yaml()`` generates a template from the live fields o
 
 from dataclasses import MISSING, dataclass, field, fields, replace
 
+import imfeat  # type: ignore[import-untyped]  # imfeat needs a py.typed marker
 import yaml
 
 RESIZE_INTERP = ("area", "nearest")  # thumbnail filters FrameGate knows
@@ -38,7 +39,13 @@ class GateConfig:
     # The thumbnail, its resize filter and the stride are fastdet's front-end exactly
     # (Detector.front_end_spec), so one imfeat pass can feed both the gate and a fastdet
     # model. The cheaper, coarser operating point is stride=4, resize_interp="nearest".
-    thumb: int = 1024  # thumbnail side for stats (made inside imfeat's pass)
+    # thumb is a side in pixels (a square every frame is resized to, smaller ones
+    # upscaled) or an imfeat policy name that sizes it from the frame: "pow2" is the
+    # largest power of two the shorter side holds, square, never an upscale (720p -> 512,
+    # 1080p -> 1024, 4K -> 2048), floored at the grid (a frame under 64 px is upscaled to
+    # it as a fixed size would). thumb_hw(shape) gives a frame's size; the stride is capped
+    # at the cell side there so no cell of a small frame goes unsampled.
+    thumb: int | str = "pow2"  # thumbnail for stats (made inside imfeat's pass)
     resize_interp: str = (
         "area"  # thumbnail filter: "area" (box, like fastdet) or "nearest" (cv2)
     )
@@ -136,18 +143,56 @@ class GateConfig:
             raise ValueError(
                 f"resize_interp={self.resize_interp!r}: want one of {RESIZE_INTERP}"
             )
+        if isinstance(self.thumb, str):
+            if self.thumb not in imfeat.THUMB_POLICIES:
+                raise ValueError(
+                    f"thumb={self.thumb!r}: want a side in pixels or one of "
+                    f"{imfeat.THUMB_POLICIES}"
+                )
+        elif (
+            isinstance(self.thumb, bool)
+            or not isinstance(self.thumb, int)
+            or self.thumb < 1
+        ):
+            raise ValueError(f"thumb={self.thumb!r}: want a side in pixels or a policy")
 
     @property
     def grid_size(self) -> int:
         return 2**self.grid_exp
 
+    def thumb_hw(self, shape: tuple) -> tuple:
+        """The (rows, cols) thumbnail a frame of `shape` ((H, W) or (H, W, C)) gets: the
+        fixed square, or the policy's size floored at the grid."""
+        rows, cols = imfeat.thumb_size(shape[:2], self.thumb)
+        if isinstance(self.thumb, str):
+            g = self.grid_size
+            rows, cols = max(rows, g), max(cols, g)
+        return rows, cols
+
+    def stride_for(self, size: tuple) -> int:
+        """The stride on a thumbnail of `size`: cfg.stride, at most the cell side (imfeat
+        restarts the stride at cell edges along columns, not rows, so a wider stride would
+        leave cells without a sample). fastdet applies the same rule (features.stride_for),
+        so a model's features match."""
+        return max(1, min(self.stride, min(size) // self.grid_size))
+
+    def samples_per_cell_for(self, shape: tuple) -> int:
+        """Sampled pixels per finest cell, per dimension, on a frame of `shape`: what the
+        stride costs. Four is the practical floor for the moment and histogram features
+        to carry information; the default (stride 1) has 16 at 1024 px, 8 at 512."""
+        size = self.thumb_hw(shape)
+        return (min(size) // self.grid_size) // self.stride_for(size)
+
     @property
     def samples_per_cell(self) -> int:
-        """Sampled pixels per finest cell, per dimension. Below 1 the stride steps clean
-        over whole cells and some end up with no samples at all -- imfeat reports a count
-        of 0 there and every derived feature is meaningless. Four is the practical floor
-        for the moment and histogram features to carry information; the default sits
-        exactly on it."""
+        """`samples_per_cell_for` of a frame the thumbnail is a fixed square of (with a
+        policy the thumbnail follows the frame, so ask `samples_per_cell_for` about one;
+        this is then the 1080p frame's). Below 1 the stride steps clean over whole cells
+        and some end up with no samples at all -- imfeat reports a count of 0 there and
+        every derived feature is meaningless -- which `pyramid_exps` refuses for a fixed
+        square and `stride_for` caps away under a policy."""
+        if isinstance(self.thumb, str):
+            return self.samples_per_cell_for((1080, 1920))
         return (self.thumb // self.grid_size) // self.stride
 
     @property
@@ -160,7 +205,7 @@ class GateConfig:
             raise ValueError(
                 f"n_levels={self.n_levels} too deep for grid_exp={self.grid_exp}"
             )
-        if self.samples_per_cell < 1:
+        if isinstance(self.thumb, int) and self.samples_per_cell < 1:
             raise ValueError(
                 f"thumb={self.thumb} over a {self.grid_size}x{self.grid_size} grid gives "
                 f"{self.thumb // self.grid_size}px cells, which stride={self.stride} steps "

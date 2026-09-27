@@ -50,3 +50,36 @@ def test_config_is_immutable():
     with pytest.raises(FrozenInstanceError):
         cfg.thumb = 99
     assert cfg.replace(thumb=99).thumb == 99 and cfg.thumb != 99
+
+
+def test_thumb_is_a_side_or_a_policy(tmp_path):
+    """The default thumbnail follows the frame ("pow2"); a side in pixels is a fixed
+    square; the size, the stride cap and the samples per cell come from the shape."""
+    cfg = GateConfig()
+    assert cfg.thumb == "pow2"
+    assert cfg.thumb_hw((720, 1280, 3)) == (512, 512)
+    assert cfg.thumb_hw((1080, 1920)) == (1024, 1024)
+    assert cfg.thumb_hw((2160, 3840, 3)) == (2048, 2048)
+    assert cfg.thumb_hw((40, 50, 3)) == (64, 64)  # floored at the grid
+    assert cfg.samples_per_cell_for((1080, 1920, 3)) == 16
+    assert cfg.samples_per_cell_for((720, 1280, 3)) == 8
+    assert cfg.samples_per_cell == 16  # a 1080p frame's, under a policy
+    fixed = GateConfig(thumb=1024)
+    assert fixed.thumb_hw((720, 1280, 3)) == (1024, 1024)  # a fixed square, upscaled
+    assert fixed.samples_per_cell == 16 == fixed.samples_per_cell_for((720, 1280, 3))
+    coarse = GateConfig(stride=4)
+    assert coarse.stride_for((1024, 1024)) == 4
+    assert coarse.stride_for((128, 128)) == 2  # capped at the 2 px cell
+    assert coarse.samples_per_cell_for((240, 420, 3)) == 1
+    for bad in ("pow4", "", 0, True, 2.5):
+        with pytest.raises(ValueError, match="thumb="):
+            GateConfig(thumb=bad)
+    with pytest.raises(
+        ValueError, match="no samples"
+    ):  # a fixed square is checked up front
+        GateConfig(thumb=64, stride=2).pyramid_exps  # noqa: B018
+    p = tmp_path / "c.yaml"
+    p.write_text("thumb: pow2\n")
+    assert GateConfig.from_yaml(str(p)).thumb == "pow2"
+    p.write_text("thumb: 512\n")
+    assert GateConfig.from_yaml(str(p)).thumb == 512

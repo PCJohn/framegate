@@ -111,10 +111,17 @@ computed at several coarser resolutions in the *same* pass -- a dyadic **pyramid
 finest level; the coarser levels are plumbing for upcoming multi-scale signals, so **set
 `n_levels=1` to skip them** (~0.5 ms cheaper) until you need them.
 
-The thumbnail (`thumb=1024`, box-filtered: `resize_interp="area"`), the grid pyramid and
-the sampling stride (`stride=1`) are exactly the front-end of
+The thumbnail (`thumb="pow2"`: a square whose side is the largest power of two the
+frame's shorter side holds -- 720p → 512, 1080p and 1440p → 1024, 4K → 2048 -- so no frame
+is upscaled and the pass costs what the frame warrants; or a fixed side such as
+`thumb=1024`, every frame resized to it; box-filtered: `resize_interp="area"`), the grid
+pyramid and the sampling stride (`stride=1`) are exactly the front-end of
 [`fastdet`](https://github.com/PCJohn/fastdet)'s text detector (`Detector.front_end_spec`),
-so the one imfeat pass the gate makes can also feed a fastdet model.
+so the one imfeat pass the gate makes can also feed a fastdet model. A cell is 1/64 of the
+frame either way; what the size changes is the pixels a cell sees, and the signal
+thresholds (`solid_thresh`, `edge_thresh`) are in those units, set at 1024 px: a frame
+under 512 px on its shorter side, which a fixed 1024 used to upscale, is now read at 256 px
+or less. `cfg.thumb_hw(frame.shape)` is the size a frame gets.
 
 ## Recommended usage
 
@@ -388,9 +395,10 @@ default) and converts it to HSV, both inside imfeat's pass as it reads the frame
 bit `cv2.resize(INTER_AREA)`'s and `cv2.cvtColor`'s bytes, at a fraction of their cost,
 and no intermediate image). With `return_frames` (default on), it hands the thumbnail
 back on `FrameStats.thumb` (the resized BGR — or single-channel grayscale — input, at
-`cfg.thumb` resolution, written out by the pass), so a driver doing `read → gate →
-heavy_pipeline` can reuse it instead of recomputing; `FrameStats.hsv` is that thumbnail
-in HSV, made on first access. Both are `None` when the flag is off.
+the thumbnail's resolution, `cfg.thumb_hw(frame.shape)`, written out by the pass), so a
+driver doing `read → gate → heavy_pipeline` can reuse it instead of recomputing;
+`FrameStats.hsv` is that thumbnail in HSV, made on first access. Both are `None` when the
+flag is off.
 
 ## Output format
 
@@ -424,15 +432,18 @@ inert on high-motion frames; set `fast_static=False` for strict bit-exactness.
 ## Performance
 
 Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time) with the
-**default config**: `thumb=1024` (box-filtered), `grid_exp=6` (a 64x64 finest grid), a
-6-level pyramid, `stride=1`, `feat_threads=2`. Absolute numbers scale with CPU clock and
+**default config**: `thumb="pow2"` (1024 px for a 1080p frame, box-filtered), `grid_exp=6`
+(a 64x64 finest grid), a 6-level pyramid, `stride=1`, `feat_threads=2`. Absolute numbers
+scale with CPU clock and
 core count; the *shape* is consistent across machines. `examples/benchmark.py` prints the
 full picture on your own hardware -- config sweeps, where a frame goes internally, what the
 lazy maps cost, and how `feat_threads` interacts with OpenCV's own pool.
 
-The default targets 1080p and 4K sources. A 64x64 grid over a 1024px thumbnail puts one
-finest cell on ~30 source pixels of a 1080p frame, twice as fine as the older 256px-thumbnail
-default, and the pyramid runs 64,32,16,8,4,2 cells per dimension. `stride=1` visits every
+The default targets 1080p and 4K sources. A 64x64 grid over a 1080p frame's 1024px
+thumbnail puts one finest cell on ~30 source pixels, twice as fine as the older
+256px-thumbnail default, and the pyramid runs 64,32,16,8,4,2 cells per dimension; a 720p
+frame gets a 512px thumbnail (8 px cells, ~2.4x cheaper than resizing it up to 1024), a 4K
+frame 2048px (2.4x the 1024 cost: pass `thumb=1024` for a ceiling). `stride=1` visits every
 thumbnail pixel (16 samples per cell per axis): that is the front-end fastdet's models are
 trained on, and it makes the pass shareable with them, at roughly 4x the pixel work of
 `stride=2` and 16x that of `stride=4` -- on a recent laptop the imfeat pass is ~9 ms on one
@@ -471,9 +482,12 @@ What moves the number:
 
 `stride`, `thumb` and `grid_exp` interact: what `stride` costs is samples per cell, so the
 binding constraint is `cell_px / stride >= 4` where `cell_px = thumb / 2**grid_exp`.
-`cfg.samples_per_cell` reports it, and `GateConfig` refuses outright any configuration where
-the stride steps over whole cells and leaves them with no samples at all. The default has 16;
-`stride=4` sits exactly on the floor of 4.
+`cfg.samples_per_cell_for(frame.shape)` reports it (`cfg.samples_per_cell` for a fixed
+square, or a 1080p frame under a policy), and `GateConfig` refuses outright a fixed square
+whose stride steps over whole cells and leaves them with no samples at all; under a policy
+the cells follow the frame, so the stride is capped at the cell side per frame instead
+(`cfg.stride_for(size)`, the rule fastdet applies too). The default has 16 at 1024 px;
+`stride=4` sits exactly on the floor of 4 there, and a 720p frame's 512 px thumbnail has 8.
 - **`n_levels` (pyramid depth) is nearly free:** `1` ≈ 0.79 ms → `4` ≈ 0.83 ms. Coarse
   levels are exact *sums* of the finer cells' accumulators, so depth costs no extra pass
   and no extra per-pixel work — only the (tiny) reduction over cells. Ask for all of them.
@@ -493,17 +507,18 @@ instead of `np.median`, derived maps are cached, and all array outputs are lazy.
 
 Practical levers, fastest path to a smaller number first:
 
-- **Drop `thumb`.** It is by far the biggest dial. `thumb=128` roughly halves the default
-  cost; `thumb=64` is ~10x cheaper. Raise it only when you need richer per-cell statistics
-  (more pixels per cell). At `thumb=256`/`grid_exp=5` each finest cell sees 64 px at
-  `stride=1`, 16 at `stride=2`.
+- **Drop `thumb`.** It is by far the biggest dial. The default `"pow2"` already sizes it
+  from the frame (a 720p frame runs at 512 px); a fixed `thumb=512` on 1080p is about a
+  third of the 1024 cost, `thumb=128` a fraction of that. Raise it only when you need
+  richer per-cell statistics (more pixels per cell). At `thumb=256`/`grid_exp=5` each
+  finest cell sees 64 px at `stride=1`, 16 at `stride=2`.
 - **Use `stride` to bound cost at a large `thumb`,** accepting coarser stats — but remember
   it is a gather, so small strides may not pay off for a single grid.
 - **Trim `n_levels`** to what your signals actually consume; every extra level is scatter
   work on every pixel.
 - **Set `return_frames=False`** if you never read `fs.thumb` / `fs.hsv`. The default
-  attaches a fresh thumbnail to every `FrameStats` (one allocation/frame, ~192 KB at
-  `thumb=256`); turning it off reuses internal scratch and cuts that allocation.
+  attaches a fresh thumbnail to every `FrameStats` (one allocation/frame, 3 MB at 1024 px,
+  ~192 KB at `thumb=256`); turning it off reuses internal scratch and cuts that allocation.
 - **Leave `skip_duplicates=True`** (default). Byte-identical consecutive frames reuse the
   previous result behind a cheap strided pre-check — near-free on slideshows, padded streams,
   or held frames.

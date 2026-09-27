@@ -17,6 +17,11 @@ G = GateConfig().grid_size
 # See the note in test_robustness.py: this asserts pattern-to-cell geometry on 128px
 # fixtures, so it pins the fixture-scale config rather than the 1080p-targeted default.
 FIXTURE_CFG = GateConfig(thumb=256, stride=2, grid_exp=5, n_levels=4)
+# The focus tests below read pixel-scale noise (synth.hsv_scene) through a bilinear
+# upscale to 1024 px, which turns it into image-like 8 px blobs; the default policy
+# analyses a 128 px scene at its own size, where a per-pixel noise field is not an image
+# (a one-pixel blur *raises* its focus). So they pin the fixed square they were written on.
+UPSCALED = GateConfig(thumb=1024)
 
 
 def test_structure_maps_shapes_and_ranges():
@@ -70,18 +75,21 @@ def test_focus_map_localizes_blur_and_is_contrast_invariant():
     w = scene.shape[1]
     half = scene.copy()
     half[:, : w // 2] = cv2.GaussianBlur(scene, (0, 0), 3)[:, : w // 2]
-    f = Gate().image(half).focus
+    f = Gate(UPSCALED).image(half).focus
     assert f[:, 16:].mean() > 3.0 * f[:, :16].mean()  # sharp half >> blurred half
     # contrast-invariant: halving global contrast barely moves focus (energy ~var both drop)
     low = np.clip((scene.astype(np.float32) - 128) * 0.5 + 128, 0, 255).astype(np.uint8)
-    full, dim = Gate().image(scene).focus.mean(), Gate().image(low).focus.mean()
+    full = Gate(UPSCALED).image(scene).focus.mean()
+    dim = Gate(UPSCALED).image(low).focus.mean()
     assert 0.5 < dim / full < 2.0
 
 
 def test_focus_decreases_monotonically_with_blur():
     base = synth.hsv_scene(60, 2)
     means = [
-        Gate().image(base if s == 0 else cv2.GaussianBlur(base, (0, 0), s)).focus.mean()
+        Gate(UPSCALED)
+        .image(base if s == 0 else cv2.GaussianBlur(base, (0, 0), s))
+        .focus.mean()
         for s in (0.0, 1.0, 2.0, 4.0)
     ]
     assert all(a > b for a, b in pairwise(means))  # strictly decreasing

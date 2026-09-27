@@ -1,8 +1,9 @@
 """Learned per-cell maps from fastdet models, on the gate's own imfeat pass.
 
 A model is a `fastdet <https://github.com/PCJohn/fastdet>`_ ``.fdt`` file whose front-end
-is the gate's -- the same thumbnail, filter, stride and grid pyramid -- so the imfeat
-result the gate already holds feeds it straight through ``Detector.predict_from_imfeat``:
+is the gate's -- the same thumbnail (a fixed side or the same sizing policy), filter,
+stride and grid pyramid -- so the imfeat result the gate already holds feeds it straight
+through ``Detector.predict_from_imfeat``:
 one pass for the gate's signals and for every model, and each model adds only its
 scorer (well under a millisecond) per frame.
 
@@ -54,7 +55,11 @@ def resolve_models(cfg: GateConfig) -> dict[str, Path]:
 
 
 def check_front_end(name: str, path: Path, spec: dict, cfg: GateConfig) -> None:
-    """Raise unless the model's front-end (``Detector.front_end_spec``) is the gate's."""
+    """Raise unless the model's front-end (``Detector.front_end_spec``) is the gate's.
+
+    ``thumb`` compares as the model records it: a side in pixels, or a policy name that
+    both resolve per frame the same way (imfeat's rule, the size floored at the grid and
+    the stride capped at the cell side)."""
     want = {
         "thumb": cfg.thumb,
         "stride": cfg.stride,

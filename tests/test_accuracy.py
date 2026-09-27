@@ -142,15 +142,16 @@ def test_duplicate_skip_is_lossless():
 def test_return_frames_default_on_and_toggleable():
     import cv2
 
-    t = GateConfig().thumb
-    fs = Gate().image(synth.hsv_scene(60, 2))
-    assert fs.thumb.shape == (t, t, 3) and fs.hsv.shape == (t, t, 3)
+    scene = synth.hsv_scene(60, 2)
+    t = GateConfig().thumb_hw(scene.shape)  # the policy's size for this frame
+    assert t == (128, 128)  # a 128 px scene: its own size
+    fs = Gate().image(scene)
+    assert fs.thumb.shape == (*t, 3) and fs.hsv.shape == (*t, 3)
     # hsv is made from the thumbnail on demand: cvtColor's bytes
     assert np.array_equal(fs.hsv, cv2.cvtColor(fs.thumb, cv2.COLOR_BGR2HSV))
     g = Gate().image(synth.grayscale_scene(2))
-    assert g.thumb.shape == (t, t) and g.hsv.shape == (
-        t,
-        t,
+    assert g.thumb.shape == t and g.hsv.shape == (
+        *t,
         3,
     )  # grayscale thumb is 1-channel
     assert not g.hsv[:, :, :2].any() and np.array_equal(g.hsv[:, :, 2], g.thumb)
@@ -169,13 +170,14 @@ def test_pass_on_bgr_equals_pass_on_cvtcolor_hsv():
 
     cfg = GateConfig()
     gate = Gate(cfg)
-    as_is = imfeat.FeatureComputer(
-        shape=(cfg.thumb, cfg.thumb, 3),
-        grid=[(e, e) for e in cfg.pyramid_exps],
-        stride=cfg.stride,
-        feature_space=None,
-    )
     for frame in (synth.noisy(synth.hsv_scene(60, 2)), synth.grayscale_scene(2)):
+        size = cfg.thumb_hw(frame.shape)
+        as_is = imfeat.FeatureComputer(
+            shape=(*size, 3),
+            grid=[(e, e) for e in cfg.pyramid_exps],
+            stride=cfg.stride_for(size),
+            feature_space=None,
+        )
         fs = gate.image(frame)
         want = as_is.features(fs.hsv)  # the old path: cvtColor first, imfeat on HSV
         assert np.array_equal(fs.chan, want.moments[-1].astype(np.float32))
@@ -193,22 +195,27 @@ def test_pass_on_frame_equals_pass_on_cv2_thumbnail():
     every number the gate reads, and the thumbnail it hands back, are byte for byte what
     cv2.resize followed by the pass on the thumbnail gives. Frames cv2 has to resize --
     smaller than the thumbnail in an axis (bilinear in OpenCV), grayscale, "nearest" --
-    still come out that way, and a change of frame size mid-stream is fine."""
+    still come out that way, and a change of frame size mid-stream is fine. Under the
+    default policy the thumbnail's size follows the frame (1080p and 1440p: 1024, 720p:
+    512); with a fixed square every frame is resized to it."""
     import cv2
     import imfeat
 
     from framegate import signals as S
 
-    def check(gate, frame, interp):
+    def check(gate, frame, interp, size=None):
         cfg = gate.cfg
+        rows, cols = cfg.thumb_hw(frame.shape)
+        if size is not None:
+            assert (rows, cols) == size
         as_is = imfeat.FeatureComputer(
-            shape=(cfg.thumb, cfg.thumb, 3),
+            shape=(rows, cols, 3),
             grid=[(e, e) for e in cfg.pyramid_exps],
-            stride=cfg.stride,
+            stride=cfg.stride_for((rows, cols)),
             feature_space=None,
         )
         fs = gate.image(frame)
-        small = cv2.resize(frame, (cfg.thumb, cfg.thumb), interpolation=interp)
+        small = cv2.resize(frame, (cols, rows), interpolation=interp)
         if small.ndim == 2:  # a grayscale frame: H = S = 0, V = luma
             assert np.array_equal(fs.thumb, small)
             small = cv2.cvtColor(small, cv2.COLOR_GRAY2BGR)
@@ -237,13 +244,26 @@ def test_pass_on_frame_equals_pass_on_cv2_thumbnail():
             [xx * 255 // 1919, yy * 255 // 1079, ((xx // 7 + yy // 5) % 2) * 255], -1
         ).astype(np.uint8),
         rng.integers(0, 256, (1440, 2560, 3), dtype=np.uint8),  # another size: rebuilt
-        rng.integers(0, 256, (720, 1280, 3), dtype=np.uint8),  # cv2: an upscale
+        rng.integers(0, 256, (720, 1280, 3), dtype=np.uint8),  # 512 by policy; cv2 up
         rng.integers(0, 256, (1080, 1920), dtype=np.uint8),  # cv2: grayscale
         rng.integers(0, 256, (1080, 1920, 3), dtype=np.uint8),  # fused again
+        rng.integers(0, 256, (40, 50, 3), dtype=np.uint8),  # under the grid: cv2 up
     ]
-    gate = Gate(GateConfig(feat_threads=2))
-    for frame in frames:
-        check(gate, frame, cv2.INTER_AREA)
+    sizes = [(1024, 1024)] * 2 + [(1024, 1024), (512, 512), (1024, 1024)] * 1
+    sizes += [(1024, 1024), (64, 64)]
+    gate = Gate(GateConfig(feat_threads=2))  # the "pow2" policy
+    assert gate._gate.cfg.thumb == "pow2"
+    for frame, size in zip(frames, sizes, strict=True):
+        check(gate, frame, cv2.INTER_AREA, size)
+        assert gate._gate._fuses(frame) == (
+            frame.ndim == 3 and min(frame.shape[:2]) >= 64
+        )
+    gate = Gate(
+        GateConfig(feat_threads=2, thumb=1024)
+    )  # a fixed square: 720p is upscaled
+    for frame, size in zip(frames[:5], [(1024, 1024)] * 5, strict=True):
+        check(gate, frame, cv2.INTER_AREA, size)
+        assert gate._gate._fuses(frame) == (frame.ndim == 3 and frame.shape[0] >= 1024)
     gate = Gate(GateConfig(resize_interp="nearest"))  # cv2 throughout
     for frame in frames[:1] + frames[3:4]:
         check(gate, frame, cv2.INTER_NEAREST)
@@ -288,7 +308,10 @@ def test_motion_map_only_on_video_and_denoised():
     # the noise floor suppresses static sensor speckle: a near-static noisy stream -> mostly zeros
     rng = np.random.default_rng(5)
     base = rng.integers(110, 140, (240, 420, 3), dtype=np.uint8)
-    gq = Gate()
+    # at a fixed 1024 px, where edge_thresh was set: the policy gives this 240 px frame a
+    # 128 px thumbnail, whose box-averaged speckle falls under the blank gate's edge_thresh
+    # (846 against 1000), so a static noisy frame that small reads as blank instead
+    gq = Gate(GateConfig(thumb=1024))
     for _ in range(4):
         noisy = np.clip(
             base.astype(int) + rng.integers(-3, 4, base.shape), 0, 255
