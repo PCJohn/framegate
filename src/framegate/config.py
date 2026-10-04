@@ -108,8 +108,7 @@ class GateConfig:
     freeze_win: int = 1  # L1 ring: recent kept frames to compare against
 
     # --- free temporal signals ---
-    flicker_win: int = 32  # brightness-history length (also flicker FFT length)
-    fade_win: int = 8  # frames over which a fade ramp is measured
+    fade_win: int = 8  # frames over which a fade ramp is measured (brightness history)
     fade_span: float = 60.0  # V-mean change treated as a full fade
 
     # --- text map ---

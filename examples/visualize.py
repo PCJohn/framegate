@@ -7,7 +7,7 @@
     python examples/visualize.py clip.mp4 --model face=face.fdt --model text=text.fdt
 
 Shows the appearance maps (motion / saliency / text / focus / structure), the per-cell
-moment grids, the temporal event signals (cut / fade / flicker / struct-corr),
+moment grids, the temporal event signals (cut / fade / struct-corr),
 and a live latency panel separating framegate compute from matplotlib render --
 so the speed of the package is visible against the cost of just drawing it.
 
@@ -133,9 +133,9 @@ def run(src, cfg=None):
     ln_ev = theme.series_axis(
         ax_ev,
         "events",
-        ["struct_corr", "fade", "flicker"],
+        ["struct_corr", "fade"],
         HISTORY,
-        [theme.GREEN, theme.BLUE, theme.VIOLET],
+        [theme.GREEN, theme.BLUE],
     )
 
     txt = theme.readout(fig.add_subplot(gs[3, 2:7]), fontsize=9.5)
@@ -146,7 +146,6 @@ def run(src, cfg=None):
             "cut_score",
             "struct_corr",
             "fade",
-            "flicker",
             "core",
             "maps",
             "render",
@@ -209,7 +208,6 @@ def run(src, cfg=None):
                 ("cut_score", sig.cut_score),
                 ("struct_corr", sig.struct_corr),
                 ("fade", sig.fade),
-                ("flicker", sig.flicker),
                 ("core", t_core),
                 ("maps", t_core + t_maps),
                 ("render", last_render),
@@ -259,7 +257,7 @@ def run(src, cfg=None):
                         ax_cut.axvline(f - origin, color=theme.ROSE, lw=1.0, alpha=0.8)
                     )
 
-            for ln, k in zip(ln_ev, ("struct_corr", "fade", "flicker"), strict=True):
+            for ln, k in zip(ln_ev, ("struct_corr", "fade"), strict=True):
                 ln.set_ydata(hist[k])
             for ln, k in zip(ln_lat, ("core", "maps"), strict=True):
                 ln.set_ydata(hist[k])
@@ -283,7 +281,7 @@ def run(src, cfg=None):
                 f"total        {t_core + t_maps:6.2f} ms   {fps:5.1f} fps   frame {fidx}\n"
                 f"cut_score  {sig.cut_score:5.3f}   corr {sig.struct_corr:+.3f}\n"
                 f"gain/bias  {sig.gain:5.2f} / {sig.bias:+.1f}\n"
-                f"fade/flick {sig.fade:+.2f} / {sig.flicker:.2f}\n"
+                f"fade       {sig.fade:+.2f}\n"
                 f"exposure   {fs.exposure:5.1f}   contrast {fs.contrast:5.1f}\n"
                 f"colorful   {fs.colorfulness:5.1f}   detail   {fs.detail:5.2f}\n"
                 f"noise/clip {fs.noise_floor:5.2f} / {fs.clipping:+.2f}\n"

@@ -158,12 +158,12 @@ def grayscale_scene(vseed, size=THUMB):
 
 
 def run_stream(gate_or_stream, frames, gate=None):
-    """Drive a sequence and collect (cuts, freezes, fades, flickers).
+    """Drive a sequence and collect (cuts, freezes, fades).
     If `gate` is given, frames are FrameStats producers; otherwise a Gate is used."""
     from framegate import Gate
 
     g = gate_or_stream if isinstance(gate_or_stream, Gate) else Gate()
-    cuts, freezes, fades, flickers = [], 0, [], []
+    cuts, freezes, fades = [], 0, []
     for f in frames:
         _, sig = g.frame(f)
         if sig.cut:
@@ -171,5 +171,4 @@ def run_stream(gate_or_stream, frames, gate=None):
         if sig.freeze:
             freezes += 1
         fades.append(sig.fade)
-        flickers.append(sig.flicker)
-    return cuts, freezes, fades, flickers
+    return cuts, freezes, fades

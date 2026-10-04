@@ -229,15 +229,3 @@ def fade_score(series: np.ndarray, span: float) -> float:
         return 0.0
     mono = float(np.mean(np.sign(d) == np.sign(total)))
     return float(np.sign(total) * mono * min(abs(total) / span, 1.0))
-
-
-def flicker_score(series: np.ndarray, window: np.ndarray) -> float:
-    """Dominant-frequency power fraction of the detrended brightness series in
-    [0, 1]: high = a strong periodic component (strobe / flicker). `window` is a
-    precomputed taper (e.g. Hann) the length of `series`."""
-    x = series - series.mean()
-    if x.std() < 1e-3:
-        return 0.0
-    p = np.abs(np.fft.rfft(x * window)) ** 2
-    p[0] = 0.0
-    return float(p.max() / (p.sum() + 1e-9))

@@ -82,8 +82,8 @@ class _RefAnalyzer:
         self._prev_luma = self._prev_color = self._prev_V = self._prev_ovec = None
         self._l1 = deque(maxlen=max(1, cfg.freeze_win))
         self._roll = _RefRolling(cfg.roll_win, cfg.robust_min)
-        self._vhist = deque(maxlen=cfg.flicker_win)
-        self._han = np.hanning(cfg.flicker_win).astype(np.float32)
+        # longer than the ring: fade reads its tail
+        self._vhist = deque(maxlen=max(32, cfg.fade_win))
         self._cut_cd = self._lock = 0
         self._s2 = self._s1 = 0.0
         self._o1 = False
@@ -165,9 +165,6 @@ class _RefAnalyzer:
             if len(hist) >= c.fade_win
             else 0.0
         )
-        flicker = (
-            S.flicker_score(hist, self._han) if len(hist) >= c.flicker_win else 0.0
-        )
         self._prev_luma, self._prev_color, self._prev_V = luma, color, V
         self._prev_ovec = ovec
         self._l1.append((luma, V))
@@ -175,9 +172,7 @@ class _RefAnalyzer:
         self._cut_cd = 1 if cut else max(0, self._cut_cd - 1)
         self._lock = c.min_scene_len if cut else max(0, self._lock - 1)
         return (
-            TemporalSignals(
-                luma_corr, a, b, cut, cut_score, cut_frame, freeze, fade, flicker
-            ),
+            TemporalSignals(luma_corr, a, b, cut, cut_score, cut_frame, freeze, fade),
             resid,
             ori,
         )
@@ -187,7 +182,7 @@ class _RefAnalyzer:
 
 
 def _footage(seed=0, hw=(180, 320)):
-    """Duplicates, blank frames, a fade, a cut, a flicker, a pan, noise -- every branch."""
+    """Duplicates, blank frames, a fade, a cut, a strobe, a pan, noise -- every branch."""
     rng = np.random.default_rng(seed)
     h, w = hw
     base = rng.integers(0, 256, (h, w, 3), np.uint8)
@@ -229,6 +224,8 @@ def _bits_equal(a, b):
         {"fast_static": False},
         {"shift_search": 0},
         {"shift_search": 5},
+        {"fade_win": 2},
+        {"fade_win": 40},
     ],
 )
 def test_update_equals_the_reference_bit_for_bit(overrides):

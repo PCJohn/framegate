@@ -1,5 +1,5 @@
 """Temporal layer: StreamAnalyzer consumes FrameStats in order and emits
-TemporalSignals (cut, freeze, fade, flicker; the motion map lives on FrameStats).
+TemporalSignals (cut, freeze, fade; the motion map lives on FrameStats).
 Reset across blank frames,
 since you can't diff a frame against content from before a hard break.
 """
@@ -27,11 +27,10 @@ class TemporalSignals:
     cut_frame: int  # true frame index of the cut (-1 if none)
     freeze: bool
     fade: float  # signed fade strength (-1 out .. +1 in)
-    flicker: float  # periodic-power fraction (0..1)
 
     @classmethod
     def none(cls) -> "TemporalSignals":
-        return cls(1.0, 1.0, 0.0, False, 0.0, -1, False, 0.0, 0.0)
+        return cls(1.0, 1.0, 0.0, False, 0.0, -1, False, 0.0)
 
 
 class _RollingRobust:
@@ -90,8 +89,9 @@ class _Luma:
 
 
 class _VHistory:
-    """The last `win` brightness values in order, as one contiguous slice of a doubled
-    ring (each value is written twice, `win` apart), so no array is built per frame."""
+    """The last `win` brightness values in order (the fade ramp's window), as one
+    contiguous slice of a doubled ring (each value is written twice, `win` apart), so no
+    array is built per frame."""
 
     def __init__(self, win: int):
         self._win = win
@@ -137,10 +137,7 @@ class StreamAnalyzer:
         self._prev_V: float | None = None
         self._l1: deque = deque(maxlen=max(1, self.cfg.freeze_win))  # (luma, V) ring
         self._roll = _RollingRobust(self.cfg.roll_win, self.cfg.robust_min)
-        self._vhist = _VHistory(self.cfg.flicker_win)
-        self._han = np.hanning(self.cfg.flicker_win).astype(
-            np.float32
-        )  # precomputed for flicker
+        self._vhist = _VHistory(max(1, self.cfg.fade_win))  # brightness history
         self._shift = S.ShiftSearch()  # best_shift with its working arrays kept
         self._cut_cd = 0  # suppress freeze 1 frame post-cut
         self._lock = 0  # min-shot-length cut debounce
@@ -195,9 +192,8 @@ class StreamAnalyzer:
         vp = float(np.true_divide(prev.sumsq, n, dtype=np.float32))  # (pc * pc).mean()
         if vp < 1e-6:
             return 1.0, float(cur.mean - prev.mean), cur.map - prev.map
-        a = (
-            float(np.true_divide(cross, n, dtype=np.float32)) / vp
-        )  # (pc * cc).mean() / vp
+        # (pc * cc).mean() / vp
+        a = float(np.true_divide(cross, n, dtype=np.float32)) / vp
         b = float(cur.mean - a * prev.mean)
         return a, b, cur.map - (a * prev.map + b)
 
@@ -275,15 +271,9 @@ class StreamAnalyzer:
         freeze = self._frozen(luma, V, resid) and not cut and self._cut_cd == 0
 
         self._vhist.append(V)
-        n_hist = len(self._vhist)
         fade = (
             S.fade_score(self._vhist.last(c.fade_win), c.fade_span)
-            if n_hist >= c.fade_win
-            else 0.0
-        )
-        flicker = (
-            S.flicker_score(self._vhist.last(c.flicker_win), self._han)
-            if n_hist >= c.flicker_win
+            if len(self._vhist) >= c.fade_win
             else 0.0
         )
 
@@ -294,6 +284,4 @@ class StreamAnalyzer:
         self._cut_cd = 1 if cut else max(0, self._cut_cd - 1)
         self._lock = c.min_scene_len if cut else max(0, self._lock - 1)
 
-        return TemporalSignals(
-            luma_corr, a, b, cut, cut_score, cut_frame, freeze, fade, flicker
-        )
+        return TemporalSignals(luma_corr, a, b, cut, cut_score, cut_frame, freeze, fade)

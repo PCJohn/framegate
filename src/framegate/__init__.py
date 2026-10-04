@@ -2,7 +2,7 @@
 
 Run it first on an image or video frame to get cheap, broadly-useful signals
 (blank, exposure, saliency / fine-texture maps) plus, for video, a motion map and
-temporal signals (shot cut, freeze, fade, flicker) -- so a heavy model runs only
+temporal signals (shot cut, freeze, fade) -- so a heavy model runs only
 where and when it's worth it.
 
 Quick start:

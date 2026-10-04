@@ -18,7 +18,6 @@ robust_k: 8.0
 cut_dissim: 0.45
 min_scene_len: 6
 freeze_eps: 0.2
-flicker_win: 32
 fade_win: 8
 fade_span: 60.0
 text_achromatic_w: 0.5

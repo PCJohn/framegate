@@ -47,7 +47,7 @@ The design has exactly two layers, split along the only axis that matters —
 - **`FrameGate` / `FrameStats`** — stateless per-frame extraction. Works identically
   on a still image or a video frame. Produces all single-frame signals.
 - **`StreamAnalyzer` / `TemporalSignals`** — the temporal layer. Consumes a stream of
-  `FrameStats` and adds cut / freeze / fade / flicker.
+  `FrameStats` and adds cut / freeze / fade.
 
 `Gate` is a thin facade over both: `gate.image()` uses only the stateless layer;
 `gate.frame()` runs both. A single image simply never touches the temporal layer —
@@ -205,7 +205,6 @@ Temporal (`TemporalSignals`, video only):
 | `cut_score`   | Raw dissimilarity that drives the cut decision. |
 | `freeze`      | Frame is (near) identical to the previous one. |
 | `fade`        | Signed fade strength, -1 (to black) .. +1 (from black). |
-| `flicker`     | Periodic-brightness power fraction, 0..1 (strobing). |
 | `struct_corr` | Motion-compensated luma correlation with the previous frame. |
 | `gain`,`bias` | Global photometric change (a·prev+b) between frames. |
 
@@ -575,7 +574,7 @@ framegate/
 │   └── publish.py         # Publisher demo: drops frames, prints shot_id + shot_group_id
 └── tests/
     ├── synth.py           # synthetic scene + pattern builders
-    ├── test_accuracy.py   # feature functionality: cuts, blank, freeze, fade, flicker, dedup
+    ├── test_accuracy.py   # feature functionality: cuts, blank, freeze, fade, dedup
     ├── test_robustness.py # degenerate inputs, value ranges, invariances, config sweeps
     ├── test_config.py     # YAML template parity, overrides, immutability
     ├── test_latency.py    # per-frame latency budget (min-of-repeats, GC off)
@@ -583,6 +582,7 @@ framegate/
     ├── test_structure.py  # structure-tensor feature plumbing
     ├── test_reid.py       # Bernoulli model + Background: exactness, loose-match, latency
     ├── test_shotmem.py    # ShotMemory + ShotTracker: group ids, recall+score, metadata, ABAB
+    ├── test_stream_exact.py # StreamAnalyzer == its reference implementation, bit for bit
     └── test_models.py     # learned maps == fastdet's own prediction; lookup, overrides, refusals
 ```
 

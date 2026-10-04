@@ -58,7 +58,7 @@ def test_blank_and_white_flash_are_blank_not_cut():
 
 def test_freeze_on_held_frame():
     c = synth.hsv_scene(60, 2)
-    _, freezes, _, _ = synth.run_stream(
+    _, freezes, _ = synth.run_stream(
         Gate(), [synth.noisy(c) for _ in range(3)] + [c] * 8
     )
     assert freezes >= 6
@@ -78,17 +78,16 @@ def test_min_scene_len_debounce():
 def test_fade_is_signed_and_not_a_cut():
     c = synth.hsv_scene(60, 2)
     frames = [synth.noisy(synth.dim(c, f)) for f in np.linspace(1.0, 0.15, 16)]
-    cuts, _, fades, _ = synth.run_stream(Gate(), frames)
+    cuts, _, fades = synth.run_stream(Gate(), frames)
     assert cuts == []
     assert min(fades) < -0.5  # strong darkening
 
 
-def test_flicker_detected_without_false_cuts():
+def test_strobe_causes_no_false_cuts():
     c = synth.hsv_scene(60, 2)
     frames = [synth.noisy(synth.dim(c, 1.0 if i % 2 == 0 else 0.45)) for i in range(40)]
-    cuts, _, _, flickers = synth.run_stream(Gate(), frames)
+    cuts, _, _ = synth.run_stream(Gate(), frames)
     assert cuts == []
-    assert max(flickers) > 0.4
 
 
 def test_grayscale_input_is_colorless_but_detects_cuts():

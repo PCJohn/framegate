@@ -134,7 +134,6 @@ def test_temporal_signal_ranges_over_a_mixed_stream():
     for f in frames:
         fs, sig = g.frame(f)
         assert -1.0 <= sig.fade <= 1.0
-        assert 0.0 <= sig.flicker <= 1.0
         assert sig.struct_corr <= 1.0 + 1e-6
         assert sig.cut_score >= 0.0
         if fs.motion is not None:
@@ -434,26 +433,10 @@ def test_fade_in_is_positive_fade_out_is_negative():
     assert min(out) < -0.5 and max(inn) > 0.5
 
 
-def test_static_scene_has_no_fade_no_flicker():
+def test_static_scene_has_no_fade():
     scene = synth.hsv_scene(60, 2)
     sigs = _stream([synth.noisy(scene) for _ in range(40)])
     assert max(abs(s.fade) for s in sigs) < 0.5
-    assert max(s.flicker for s in sigs) < 0.4
-
-
-def test_steady_brightness_has_no_flicker_but_strobe_does():
-    scene = synth.hsv_scene(60, 2)
-    steady = [s.flicker for s in _stream([synth.noisy(scene) for _ in range(40)])]
-    strobe = [
-        s.flicker
-        for s in _stream(
-            [
-                synth.noisy(synth.dim(scene, 1.0 if i % 2 == 0 else 0.4))
-                for i in range(40)
-            ]
-        )
-    ]
-    assert max(steady) < 0.4 < max(strobe)
 
 
 def test_freeze_positive_and_negative():
