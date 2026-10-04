@@ -58,10 +58,72 @@ def ncc0(prev: np.ndarray, cur: np.ndarray) -> float:
 def best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
     """argmax normalized cross-correlation of cur's center vs prev over +/-s
     integer cell shifts (square maps), so a camera pan (a translation of the map)
-    still correlates highly and isn't read as a cut. Returns (corr, dy, dx),
-    vectorized over all (2s+1)^2 shifts via a sliding-window view."""
-    if s <= 0:
-        return ncc0(prev, cur), 0, 0
+    still correlates highly and isn't read as a cut. Returns (corr, dy, dx), the
+    values of `_best_shift` (all (2s+1)^2 shifts at once via a sliding-window view)
+    -- see ShiftSearch for how they are computed."""
+    return ShiftSearch()(prev, cur, s)
+
+
+class ShiftSearch:
+    """`best_shift`, arranged so that numpy moves as little as it can and still sums in the
+    same order. `_best_shift` gathers the (2s+1)^2 windows into one array (660 KB at
+    64x64, +/-3, from a map with a 48-byte column stride) and then makes the centred
+    windows and two product arrays of the same size, every one a fresh temporary. Here
+    the only copy is of the map's columns: band dx holds columns [dx, dx + h) of every
+    row, contiguous, and the windows of every dy are consecutive slices of it, so a view
+    of the bands has every window as one contiguous run of h*h elements -- which is what
+    the reduction over the window axes must see for numpy to sum each window in the same
+    order as it sums a copy (a window taken straight from the map, rows apart, is summed
+    row by row: other bits). The centred windows and the products go to arrays kept per
+    map size, the squares in place of the centred windows once the products are taken.
+    Same values, same operations, same order: the same bits, in about two thirds of
+    `_best_shift`'s time; the rest is the five passes numpy cannot fuse."""
+
+    def __init__(self):
+        self._key = None
+
+    def _fit(self, g: int, s: int) -> None:
+        h = g - 2 * s
+        n = 2 * s + 1
+        self._bands = np.empty((n, g, h), np.float32)  # columns [dx, dx + h) of prev
+        # (n, n, h, h): window [dx, dy] = bands[dx, dy : dy + h], contiguous in the band
+        self._wins = sliding_window_view(self._bands, (h, h), axis=(1, 2))[:, :, 0]
+        self._centred = np.empty(
+            (n, n, h, h), np.float32
+        )  # the windows, centred; squares
+        self._prod = np.empty(
+            (n, n, h, h), np.float32
+        )  # their products with the centre
+        self._h, self._key = h, (g, s)
+
+    def __call__(self, prev: np.ndarray, cur: np.ndarray, s: int):
+        if s <= 0:
+            return ncc0(prev, cur), 0, 0
+        g = prev.shape[-1]
+        if self._key != (g, s) or prev.dtype != np.float32:
+            if prev.dtype != np.float32:  # not the gate's maps: the plain version
+                return _best_shift(prev, cur, s)
+            self._fit(g, s)
+        h = self._h
+        n = 2 * s + 1
+        c = cur[s : s + h, s : s + h]
+        c = c - c.mean()
+        nc = np.sqrt((c * c).sum()) + 1e-6
+        # bands[dx] = prev[:, dx : dx + h], one copy from a (g, n, h) view of the columns
+        np.copyto(
+            self._bands, sliding_window_view(prev, h, axis=1)[:, :n].transpose(1, 0, 2)
+        )
+        wins = self._wins
+        a = np.subtract(wins, wins.mean(axis=(2, 3), keepdims=True), out=self._centred)
+        cross = np.multiply(a, c, out=self._prod).sum(axis=(2, 3))
+        na = np.sqrt(np.multiply(a, a, out=a).sum(axis=(2, 3))) + 1e-6
+        corr = (cross / (na * nc)).T.ravel()  # [dx, dy] -> row-major [dy, dx]
+        k = int(corr.argmax())
+        return float(corr[k]), k // n - s, k % n - s
+
+
+def _best_shift(prev: np.ndarray, cur: np.ndarray, s: int):
+    """best_shift as written: fresh temporaries, any float dtype."""
     g = prev.shape[-1]
     h = g - 2 * s
     c = cur[s : s + h, s : s + h]

@@ -37,10 +37,15 @@ class TemporalSignals:
 class _RollingRobust:
     """Median + MAD over a trailing window, excluding the current sample, so an
     event can't inflate its own baseline. Uses an explicit sort (np.median's
-    dispatch dominates at this window size); the value is identical."""
+    dispatch dominates at this window size); the value is identical.
+
+    The window is a ring in one float32 array: the median and MAD sort a copy, so the
+    ring's order does not matter, and no array is built from a deque per frame."""
 
     def __init__(self, win, min_samples, eps=1e-3):
-        self._buf = deque(maxlen=win)
+        self._ring = np.empty(win, np.float32)
+        self._win = win
+        self._n = 0  # samples recorded so far (the ring holds min(_n, win) of them)
         self._min = min_samples
         self._eps = eps
 
@@ -50,18 +55,65 @@ class _RollingRobust:
         n = a.size
         return 0.5 * (a[(n - 1) // 2] + a[n // 2])
 
+    def _record(self, x: float) -> None:
+        self._ring[self._n % self._win] = x
+        self._n += 1
+
     def score(self, x: float) -> float:
         """Robust z-score of x against the trailing window, then record x. 0.0 until the
         window has min_samples (baseline not yet trusted). x is scored against the window
         *before* being added, so an event can't inflate its own baseline."""
-        if len(self._buf) < self._min:
-            self._buf.append(x)
+        n = self._n
+        if n < self._min:
+            self._record(x)
             return 0.0
-        a = np.fromiter(self._buf, np.float32)
+        a = self._ring[: min(n, self._win)].copy()
         med = self._median_sorted(a)
         z = (x - med) / (1.4826 * self._median_sorted(np.abs(a - med)) + self._eps)
-        self._buf.append(x)
+        self._record(x)
         return float(z)
+
+
+class _Luma:
+    """One frame's cell-mean luma map with the statistics every pairwise step reads: the
+    mean, the centred map and its sum of squares. Computed once when the frame is current
+    and carried over when it becomes the previous frame, so nothing is derived twice --
+    the same numpy operations, so the same bits as recomputing them."""
+
+    __slots__ = ("centred", "map", "mean", "sumsq")
+
+    def __init__(self, luma: np.ndarray):
+        self.map = luma
+        self.mean = luma.mean()
+        self.centred = luma - self.mean
+        self.sumsq = (self.centred * self.centred).sum()
+
+
+class _VHistory:
+    """The last `win` brightness values in order, as one contiguous slice of a doubled
+    ring (each value is written twice, `win` apart), so no array is built per frame."""
+
+    def __init__(self, win: int):
+        self._win = win
+        self._buf = np.empty(2 * win, np.float32)
+        self._n = 0
+
+    def clear(self) -> None:
+        self._n = 0
+
+    def append(self, v: float) -> None:
+        i = self._n % self._win
+        self._buf[i] = v
+        self._buf[i + self._win] = v
+        self._n += 1
+
+    def __len__(self) -> int:
+        return min(self._n, self._win)
+
+    def last(self, k: int) -> np.ndarray:
+        """The newest k values, oldest first (k <= len(self))."""
+        end = self._n % self._win + self._win
+        return self._buf[end - k : end]
 
 
 class StreamAnalyzer:
@@ -77,6 +129,7 @@ class StreamAnalyzer:
     def __init__(self, cfg: GateConfig | None = None):
         self.cfg = cfg or GateConfig()
         self._prev_luma: np.ndarray | None = None  # prev cell-mean luma map (G, G)
+        self._prev: _Luma | None = None  # ... with its statistics (see _Luma)
         self._prev_color: np.ndarray | None = None  # prev global colour vector (3,)
         self._prev_ovec: np.ndarray | None = (
             None  # prev per-cell orientation vec (G,G,2)
@@ -84,10 +137,11 @@ class StreamAnalyzer:
         self._prev_V: float | None = None
         self._l1: deque = deque(maxlen=max(1, self.cfg.freeze_win))  # (luma, V) ring
         self._roll = _RollingRobust(self.cfg.roll_win, self.cfg.robust_min)
-        self._vhist: deque = deque(maxlen=self.cfg.flicker_win)
+        self._vhist = _VHistory(self.cfg.flicker_win)
         self._han = np.hanning(self.cfg.flicker_win).astype(
             np.float32
         )  # precomputed for flicker
+        self._shift = S.ShiftSearch()  # best_shift with its working arrays kept
         self._cut_cd = 0  # suppress freeze 1 frame post-cut
         self._lock = 0  # min-shot-length cut debounce
         self._s2 = self._s1 = 0.0
@@ -97,7 +151,7 @@ class StreamAnalyzer:
 
     def _reset(self):
         self._prev_luma = self._prev_color = self._prev_V = None
-        self._prev_ovec = None
+        self._prev = self._prev_ovec = None
         self._l1.clear()
         self._vhist.clear()
         self._s2 = self._s1 = 0.0
@@ -129,24 +183,49 @@ class StreamAnalyzer:
                 return True
         return False
 
-    def _luma_corr(self, prev, cur):
+    # The pairwise steps below are _affine(), ncc0() and the two std() calls written on the
+    # carried statistics (_Luma): each formula is the original's, operation for operation,
+    # with the reductions it would recompute replaced by the ones already taken on the
+    # same arrays. `n` is the cell count; a mean is numpy's float32 sum over float32 n.
+
+    @staticmethod
+    def _affine_of(prev: _Luma, cur: _Luma, cross):
+        """_affine(prev.map, cur.map) from the statistics; `cross` is (pc * cc).sum()."""
+        n = prev.map.size
+        vp = float(np.true_divide(prev.sumsq, n, dtype=np.float32))  # (pc * pc).mean()
+        if vp < 1e-6:
+            return 1.0, float(cur.mean - prev.mean), cur.map - prev.map
+        a = (
+            float(np.true_divide(cross, n, dtype=np.float32)) / vp
+        )  # (pc * cc).mean() / vp
+        b = float(cur.mean - a * prev.mean)
+        return a, b, cur.map - (a * prev.map + b)
+
+    @staticmethod
+    def _std_of(x: _Luma) -> float:
+        """float(x.map.std()): the root of the mean of the centred squares, in float32."""
+        return float(np.sqrt(np.true_divide(x.sumsq, x.map.size, dtype=np.float32)))
+
+    def _luma_corr(self, prev: _Luma, cur: _Luma, cross):
         """Motion-compensated luma correlation. Skips the shift search on near-static
         frames (zero-shift corr already >= static_corr), where the search cannot
         change the cut decision -- effectively lossless."""
         c = self.cfg
-        if min(float(prev.std()), float(cur.std())) < c.ncc_flattol:
+        if min(self._std_of(prev), self._std_of(cur)) < c.ncc_flattol:
             return 1.0
-        if c.fast_static:
-            corr0 = S.ncc0(prev, cur)
+        if c.fast_static:  # S.ncc0(prev.map, cur.map), from the statistics
+            corr0 = float(cross / (np.sqrt(prev.sumsq * cur.sumsq) + 1e-6))
             if corr0 >= c.static_corr:
                 return corr0
-        return S.best_shift(prev, cur, c.shift_search)[0]
+        return self._shift(prev.map, cur.map, c.shift_search)[0]
 
-    def _cut_score(self, prev_luma, prev_color, cur_luma, cur_color) -> tuple:
+    def _cut_score(
+        self, prev: _Luma, prev_color, cur: _Luma, cur_color, cross
+    ) -> tuple:
         """(cut_score, luma_corr) = max of the luma-structure and global colour-shift
         dissimilarities, each already normalized to ~[0, 1]."""
         c = self.cfg
-        luma_corr = self._luma_corr(prev_luma, cur_luma)
+        luma_corr = self._luma_corr(prev, cur, cross)
         color = float(np.linalg.norm(prev_color - cur_color)) / (255.0 * c.color_maxd)
         return max(1.0 - luma_corr, color), luma_corr
 
@@ -160,16 +239,21 @@ class StreamAnalyzer:
             self._reset()
             return TemporalSignals.none()
         prev_ovec = self._prev_ovec  # set and cleared together with _prev_luma
-        if self._prev_luma is None or prev_ovec is None:
+        prev = self._prev
+        cur = _Luma(luma)  # its statistics, taken once; carried as `prev` next frame
+        if prev is None or prev_ovec is None:
             self._reset()
             self._prev_luma, self._prev_color, self._prev_V = luma, color, V
-            self._prev_ovec = ovec
+            self._prev, self._prev_ovec = cur, ovec
             self._l1.append((luma, V))
             self._vhist.append(V)
             self._idx_prev = self._idx
             return TemporalSignals.none()
 
-        a, b, resid = self._affine(self._prev_luma, luma)  # 2-D, no ravel copies
+        cross = (
+            prev.centred * cur.centred
+        ).sum()  # shared by the fit and the correlation
+        a, b, resid = self._affine_of(prev, cur, cross)  # 2-D, no ravel copies
         fs.residual = resid  # already (G,G); annotate the frame with its motion vs t-1
         fs.ori_change = np.hypot(
             ovec[:, :, 0] - prev_ovec[:, :, 0],
@@ -177,7 +261,7 @@ class StreamAnalyzer:
         )
 
         cut_score, luma_corr = self._cut_score(
-            self._prev_luma, self._prev_color, luma, color
+            prev, self._prev_color, cur, color, cross
         )
         robust = self._roll.score(cut_score)  # must update EVERY frame
         outlier = (cut_score > c.cut_dissim) and (robust > c.robust_k)
@@ -191,18 +275,20 @@ class StreamAnalyzer:
         freeze = self._frozen(luma, V, resid) and not cut and self._cut_cd == 0
 
         self._vhist.append(V)
-        hist = np.fromiter(self._vhist, np.float32)
+        n_hist = len(self._vhist)
         fade = (
-            S.fade_score(hist[-c.fade_win :], c.fade_span)
-            if len(hist) >= c.fade_win
+            S.fade_score(self._vhist.last(c.fade_win), c.fade_span)
+            if n_hist >= c.fade_win
             else 0.0
         )
         flicker = (
-            S.flicker_score(hist, self._han) if len(hist) >= c.flicker_win else 0.0
+            S.flicker_score(self._vhist.last(c.flicker_win), self._han)
+            if n_hist >= c.flicker_win
+            else 0.0
         )
 
         self._prev_luma, self._prev_color, self._prev_V = luma, color, V
-        self._prev_ovec = ovec
+        self._prev, self._prev_ovec = cur, ovec
         self._l1.append((luma, V))
         self._idx_prev = self._idx
         self._cut_cd = 1 if cut else max(0, self._cut_cd - 1)
