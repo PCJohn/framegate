@@ -70,7 +70,15 @@ def test_a_single_byte_anywhere_is_a_difference():
         b = _flip(a, idx)
         assert not d.same(a, b), idx
         assert d.same(a, b) == np.array_equal(a, b)
-    for row in (0, 1, 7, H // 2 - 1, H // 2 + 1, H - 2, H - 1):  # around and between the probes
+    for row in (
+        0,
+        1,
+        7,
+        H // 2 - 1,
+        H // 2 + 1,
+        H - 2,
+        H - 1,
+    ):  # around and between the probes
         assert not d.same(a, _flip(a, (row, W - 1, 2)))
 
 
@@ -110,19 +118,33 @@ def test_never_a_duplicate_when_array_equal_says_no():
     z = np.zeros((16, 32), np.float32)
     nz = z.copy()
     nz[8, 1] = -0.0
-    assert np.array_equal(z, nz) and not d.same(z, nz)  # conservative: processed, not skipped
+    # conservative: processed, not skipped
+    assert np.array_equal(z, nz) and not d.same(z, nz)
 
 
 def test_dtypes_including_object_arrays():
     d = DuplicateDetector()
-    for dtype in (np.uint8, np.int8, np.uint16, np.int32, np.float32, np.float64, np.bool_):
-        a = _frame(7, (24, 40, 3), dtype) if dtype is not np.bool_ else _frame(7, (24, 40, 3)) > 127
+    for dtype in (
+        np.uint8,
+        np.int8,
+        np.uint16,
+        np.int32,
+        np.float32,
+        np.float64,
+        np.bool_,
+    ):
+        a = (
+            _frame(7, (24, 40, 3), dtype)
+            if dtype is not np.bool_
+            else _frame(7, (24, 40, 3)) > 127
+        )
         assert d.same(a, a.copy()), dtype
         b = a.copy()
         b[23, 39, 2] = not b[23, 39, 2] if dtype is np.bool_ else b[23, 39, 2] + 1
         assert not d.same(a, b), dtype
     o = np.array([[1, 2], [3, 4]], dtype=object)
-    assert d.same(o, np.array([[1, 2], [3, 4]], dtype=object))  # equal values, other objects
+    # equal values, other objects
+    assert d.same(o, np.array([[1, 2], [3, 4]], dtype=object))
     assert not d.same(o, np.array([[1, 2], [3, 5]], dtype=object))
 
 
@@ -134,15 +156,26 @@ def test_different_shapes_and_dtypes_are_never_duplicates():
     assert not d.same(a, a[:, :, :2])  # channels
     assert not d.same(a, a.reshape(H * 3, W))  # same bytes, other shape
     assert not d.same(a, a.astype(np.int16))  # dtype
-    assert not d.same(a, a.astype(np.uint16).astype(np.uint8).astype(np.int8))  # signedness
-    assert not d.same(a[:, :, 0], a[:, :, 0].reshape(H, W, 1))  # 2-D vs 3-D of one channel
+    signed = a.astype(np.uint16).astype(np.uint8).astype(np.int8)
+    assert not d.same(a, signed)  # signedness
+    plane = a[:, :, 0]
+    assert not d.same(plane, plane.reshape(H, W, 1))  # 2-D vs 3-D of one channel
 
 
 def test_frame_shape_changes_between_calls():
     """A stream whose frames change size: each size is fitted when first seen, a stale hot row
-    from a taller frame never indexes a shorter one, and a size seen before is fitted again."""
+    from a taller frame never indexes a shorter one, and a size seen before is fitted again.
+    """
     d = DuplicateDetector()
-    sizes = [(720, 1280, 3), (1080, 1920, 3), (360, 640, 3), (720, 1280, 3), (90, 160), (1, 4, 3), (4, 4, 4)]
+    sizes = [
+        (720, 1280, 3),
+        (1080, 1920, 3),
+        (360, 640, 3),
+        (720, 1280, 3),
+        (90, 160),
+        (1, 4, 3),
+        (4, 4, 4),
+    ]
     for i, shape in enumerate(sizes):
         a = _frame(100 + i, shape)
         b = a.copy()
@@ -192,12 +225,13 @@ def test_small_and_degenerate_frames():
     for shape in ((0, 3), (0, 16, 3), (16, 0, 3), (16, 16, 0)):
         e = np.zeros(shape, np.uint8)
         assert d.same(e, e.copy()), shape
-        assert not d.same(e, np.zeros(shape[:-1] + (shape[-1] + 1,), np.uint8)), shape
+        assert not d.same(e, np.zeros((*shape[:-1], shape[-1] + 1), np.uint8)), shape
 
 
 def test_one_buffer_under_two_names_is_not_a_duplicate():
     """A caller that decodes into a reused buffer hands the gate the same array twice; the
-    previous frame's bytes are gone, so there is nothing to reuse and the frame is processed."""
+    previous frame's bytes are gone, so there is nothing to reuse and the frame is processed.
+    """
     d = DuplicateDetector()
     a = _frame(12)
     assert not d.same(a, a)
@@ -211,7 +245,8 @@ def test_one_buffer_under_two_names_is_not_a_duplicate():
 
 def test_a_changed_frame_is_rejected_without_a_full_comparison(monkeypatch):
     """The point of the probes: the block scan runs only for duplicates and for frames that
-    differ in no probed row, and a duplicate is the only frame compared in full (16 blocks)."""
+    differ in no probed row, and a duplicate is the only frame compared in full (16 blocks).
+    """
     counting = _Counting(monkeypatch)
     d = DuplicateDetector()
     a = _frame(13)
@@ -222,10 +257,12 @@ def test_a_changed_frame_is_rejected_without_a_full_comparison(monkeypatch):
     assert d.same(a, a.copy())
     assert counting.calls == 16  # every block, once
     counting.calls = 0
-    assert not d.same(a, _flip(a, (H // 2 + 3, 0, 0)))  # no probe looks here: the scan ...
-    assert 0 < counting.calls <= 9  # ... stops at the block that differs (the 9th of 16)
+    # no probe looks here: the scan stops at the block that differs (the 9th of 16)
+    assert not d.same(a, _flip(a, (H // 2 + 3, 0, 0)))
+    assert 0 < counting.calls <= 9
     counting.calls = 0
-    assert not d.same(a, _flip(a, (H // 2 + 3, 0, 0)))  # ... and taught the probe its row
+    # ... and taught the probe its row
+    assert not d.same(a, _flip(a, (H // 2 + 3, 0, 0)))
     assert counting.calls == 0
 
 
@@ -283,7 +320,9 @@ def test_the_probe_that_rejected_last_time_goes_first(monkeypatch):
     c[H // 4] ^= 1
     assert not d.same(a, c)
     assert d._hot == H // 4
-    assert counting.calls == 16  # the one duplicate at the start, scanned block by block
+    assert (
+        counting.calls == 16
+    )  # the one duplicate at the start, scanned block by block
 
 
 def test_the_probe_rows_are_fixed_per_shape():
@@ -368,7 +407,10 @@ def _median_us(fn, n: int) -> float:
     ("label", "b_of"),
     [
         ("frames that differ everywhere", lambda a: _frame(31)),
-        ("a change in one band (last rows)", lambda a: _flip(a, (slice(H - 20, H), slice(None), 0))),
+        (
+            "a change in one band (last rows)",
+            lambda a: _flip(a, (slice(H - 20, H), slice(None), 0)),
+        ),
         ("a change in no fixed probe row", lambda a: _flip(a, (H // 2 + 3, 0, 0))),
     ],
 )
@@ -386,7 +428,8 @@ def test_latency_of_rejecting_a_frame(label, b_of):
 
 def test_latency_of_the_scan_and_of_a_duplicate():
     """The cold path: a change the probes missed costs one scan that stops at its block; a
-    duplicate is compared in full. Both are the price of one such frame, not of every frame."""
+    duplicate is compared in full. Both are the price of one such frame, not of every frame.
+    """
     d = DuplicateDetector()
     a = _frame(32)
     c = a.copy()
@@ -397,9 +440,13 @@ def test_latency_of_the_scan_and_of_a_duplicate():
     b = _flip(a, (H // 2 + 3, 0, 0))
 
     def miss():
-        d._hot = d._rows[0]  # forget what the scan learned, so each call is a first miss
+        d._hot = d._rows[
+            0
+        ]  # forget what the scan learned, so each call is a first miss
         d.same(a, b)
 
     us = _median_us(miss, 200)
-    print(f"  front gate, first miss of a change in no fixed probe row (scan): {us:.0f} us")
+    print(
+        f"  front gate, first miss of a change in no fixed probe row (scan): {us:.0f} us"
+    )
     assert us < 5000.0

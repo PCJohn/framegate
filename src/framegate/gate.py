@@ -37,21 +37,23 @@ class DuplicateDetector:
     and blocks are fixed when a frame shape is first seen and re-derived only when it changes.
     """
 
-    __slots__ = ("_shape", "_dtype", "_rows", "_hot", "_probes", "_blocks")
+    __slots__ = ("_blocks", "_dtype", "_hot", "_probes", "_rows", "_shape")
 
     def __init__(self) -> None:
         self._shape: tuple = ()
-        self._dtype = None
+        self._dtype: np.dtype | None = None
         self._rows: tuple = (0, 0, 0, 0)
         self._hot = 0  # the probe row that rejected the last differing frame
-        self._probes = False  # rows can be probed: a first axis to index, and plain bytes
+        # rows can be probed: a first axis to index, and plain bytes
+        self._probes = False
         self._blocks: tuple = ()  # (first row, end row) of the blocks the scan walks
 
     def _fit(self, a: np.ndarray) -> None:
         """The probe rows and scan blocks for this frame shape. Rows are probed as bytes, which
         stands in for ``==`` on the usual integer frames; an object dtype compares pointers,
         so it goes straight to the full comparison (floats are safe: a byte difference such
-        as +0.0 against -0.0 only ever rejects, and a rejected frame is simply processed)."""
+        as +0.0 against -0.0 only ever rejects, and a rejected frame is simply processed).
+        """
         self._shape, self._dtype = a.shape, a.dtype
         n = a.shape[0] if a.ndim else 0
         self._rows = (n // 2, n // 4, (3 * n) // 4, n - 1) if n else (0, 0, 0, 0)
@@ -62,7 +64,8 @@ class DuplicateDetector:
 
     def _scan(self, a: np.ndarray, b: np.ndarray) -> bool:
         """The cold path, after every probe matched: compare block by block, stopping at the
-        first block that differs; its first differing row is the next frame's first probe."""
+        first block that differs; its first differing row is the next frame's first probe.
+        """
         for r0, r1 in self._blocks:
             if not np.array_equal(a[r0:r1], b[r0:r1]):
                 for r in range(r0, r1):
