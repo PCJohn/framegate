@@ -51,6 +51,15 @@ def _ref_best_shift(prev, cur, s):
     return float(corr[k]), k // n - s, k % n - s
 
 
+def _ref_fade_score(series, span):
+    d = np.diff(series)
+    total = float(series[-1] - series[0])
+    if total == 0.0:
+        return 0.0
+    mono = float(np.mean(np.sign(d) == np.sign(total)))
+    return float(np.sign(total) * mono * min(abs(total) / span, 1.0))
+
+
 class _RefRolling:
     def __init__(self, win, min_samples, eps=1e-3):
         self._buf = deque(maxlen=win)
@@ -161,7 +170,7 @@ class _RefAnalyzer:
         self._vhist.append(V)
         hist = np.fromiter(self._vhist, np.float32)
         fade = (
-            S.fade_score(hist[-c.fade_win :], c.fade_span)
+            _ref_fade_score(hist[-c.fade_win :], c.fade_span)
             if len(hist) >= c.fade_win
             else 0.0
         )
@@ -226,23 +235,27 @@ def _bits_equal(a, b):
         {"shift_search": 5},
         {"fade_win": 2},
         {"fade_win": 40},
+        {
+            "skip_duplicates": True
+        },  # a duplicate frame: the same FrameStats, updated twice
     ],
 )
 def test_update_equals_the_reference_bit_for_bit(overrides):
     cfg = GateConfig(
-        feat_threads=1, return_frames=False, skip_duplicates=False, **overrides
+        feat_threads=1, return_frames=False, **{"skip_duplicates": False, **overrides}
     )
     gate = Gate(cfg)
     ref = _RefAnalyzer(cfg)
     try:
         for i, frame in enumerate(_footage()):
             fs, sig = gate.frame(frame)  # the real analyzer ran inside
-            resid, ori = fs.residual, fs.ori_change
+            resid, ori = fs.residual, fs.ori_change  # ori_change is computed here
             rsig, rresid, rori = ref.update(fs)  # (overwrites nothing we still need)
             for k, v in rsig.__dict__.items():
                 assert _bits_equal(getattr(sig, k), v), (i, k, getattr(sig, k), v)
             assert _bits_equal(resid, rresid), i
             assert _bits_equal(ori, rori), i
+            assert _bits_equal(fs.ori_change, rori), i  # ... and again, cached
     finally:
         gate.close()
 
@@ -312,11 +325,17 @@ def test_luma_statistics_reproduce_the_recomputed_values():
         prev, cur = grid[:, :, 2, 0], (grid[:, :, 1, 0] * 0.9 + 7).astype(np.float32)
         if rng.random() < 0.2:
             prev = np.full((64, 64), 42.0, np.float32)  # the flat branch of the fit
-        p, c = _Luma(prev), _Luma(cur)
-        cross = (p.centred * c.centred).sum()
-        a, b, resid = StreamAnalyzer._affine_of(p, c, cross)
+        scratch = np.empty((64, 64), np.float32)
+        p, c = _Luma(prev, scratch), _Luma(cur, scratch)
+        assert _bits_equal(p.mean, prev.mean()) and _bits_equal(
+            c.sumsq, ((cur - cur.mean()) ** 2).sum()
+        )
+        cross = np.multiply(p.centred, c.centred, out=scratch).sum()
+        assert _bits_equal(cross, ((prev - prev.mean()) * (cur - cur.mean())).sum())
+        a, b, resid = StreamAnalyzer._affine_of(p, c, cross, scratch)
         ra, rb, rresid = _RefAnalyzer._affine(prev, cur)
         assert _bits_equal(a, ra) and _bits_equal(b, rb) and _bits_equal(resid, rresid)
+        assert resid is not scratch and resid.flags.c_contiguous
         assert _bits_equal(StreamAnalyzer._std_of(p), float(prev.std()))
         assert _bits_equal(StreamAnalyzer._std_of(c), float(cur.std()))
         corr0 = float(cross / (np.sqrt(p.sumsq * c.sumsq) + 1e-6))
@@ -330,6 +349,29 @@ def test_rolling_robust_ring_equals_the_deque():
         for _ in range(200):
             x = float(rng.random() * (10 if rng.random() < 0.1 else 1))
             assert _bits_equal(ring.score(x), ref.score(x)), (win, lo)
+
+
+def test_fade_score_equals_the_numpy_version():
+    """fade_score in plain Python over float32 values gives the float32-array version's
+    bits: ramps, noise, plateaus (equal neighbours), reversals, a zero span."""
+    rng = np.random.default_rng(6)
+    for _ in range(500):
+        n = int(rng.integers(2, 12))
+        kind = rng.integers(4)
+        if kind == 0:
+            v = np.linspace(rng.random() * 255, rng.random() * 255, n)
+        elif kind == 1:
+            v = rng.random(n) * 255
+        elif kind == 2:
+            v = np.repeat(rng.random(n // 2 + 1) * 255, 2)[:n]  # plateaus
+        else:
+            v = np.full(n, rng.random() * 255)  # flat: total == 0
+        v = v.astype(np.float32)
+        span = float(rng.choice([60.0, 1.0, 300.0]))
+        want = _ref_fade_score(v, span)
+        got = S.fade_score([float(x) for x in v], span)  # the ring's Python floats
+        assert _bits_equal(got, want), (v, span, got, want)
+        assert _bits_equal(S.fade_score(v, span), want)  # and over the array itself
 
 
 def test_v_history_ring_equals_the_deque():

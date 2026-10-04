@@ -77,25 +77,35 @@ class _Luma:
     """One frame's cell-mean luma map with the statistics every pairwise step reads: the
     mean, the centred map and its sum of squares. Computed once when the frame is current
     and carried over when it becomes the previous frame, so nothing is derived twice --
-    the same numpy operations, so the same bits as recomputing them."""
+    the same numpy operations, so the same bits as recomputing them.
+
+    The map is taken contiguous: FrameStats hands out a view with a 48-byte column stride
+    (one moment of one channel of the grid), and every elementwise operation on such a
+    view costs three to four times what it costs on a contiguous array, so one copy here
+    pays for itself twice over in the fit alone. The values are the same, so the sums
+    are: numpy reduces a whole array in index order whatever its strides. A mean is
+    numpy's own, the float32 sum over the count, written out (``.mean()`` is the same two
+    operations behind a few microseconds of Python)."""
 
     __slots__ = ("centred", "map", "mean", "sumsq")
 
-    def __init__(self, luma: np.ndarray):
-        self.map = luma
-        self.mean = luma.mean()
-        self.centred = luma - self.mean
-        self.sumsq = (self.centred * self.centred).sum()
+    def __init__(self, luma: np.ndarray, scratch: np.ndarray):
+        self.map = m = np.ascontiguousarray(luma)
+        self.mean = m.sum() / m.size
+        self.centred = m - self.mean
+        self.sumsq = np.multiply(self.centred, self.centred, out=scratch).sum()
 
 
 class _VHistory:
-    """The last `win` brightness values in order (the fade ramp's window), as one
-    contiguous slice of a doubled ring (each value is written twice, `win` apart), so no
-    array is built per frame."""
+    """The last `win` brightness values in order (the fade ramp's window), as one slice
+    of a doubled ring (each value is written twice, `win` apart), so nothing is rebuilt
+    per frame. The values are Python floats holding float32 values -- what the original
+    deque became when it was read into a float32 array -- for `fade_score`, which works
+    on a handful of them in plain Python."""
 
     def __init__(self, win: int):
         self._win = win
-        self._buf = np.empty(2 * win, np.float32)
+        self._buf = [0.0] * (2 * win)
         self._n = 0
 
     def clear(self) -> None:
@@ -103,14 +113,13 @@ class _VHistory:
 
     def append(self, v: float) -> None:
         i = self._n % self._win
-        self._buf[i] = v
-        self._buf[i + self._win] = v
+        self._buf[i] = self._buf[i + self._win] = S.f32(v)
         self._n += 1
 
     def __len__(self) -> int:
         return min(self._n, self._win)
 
-    def last(self, k: int) -> np.ndarray:
+    def last(self, k: int) -> list:
         """The newest k values, oldest first (k <= len(self))."""
         end = self._n % self._win + self._win
         return self._buf[end - k : end]
@@ -130,6 +139,9 @@ class StreamAnalyzer:
         self.cfg = cfg or GateConfig()
         self._prev_luma: np.ndarray | None = None  # prev cell-mean luma map (G, G)
         self._prev: _Luma | None = None  # ... with its statistics (see _Luma)
+        self._scratch: np.ndarray | None = (
+            None  # (G, G) float32 for products, per frame
+        )
         self._prev_color: np.ndarray | None = None  # prev global colour vector (3,)
         self._prev_ovec: np.ndarray | None = (
             None  # prev per-cell orientation vec (G,G,2)
@@ -174,9 +186,12 @@ class StreamAnalyzer:
         the common freeze_win=1 case does no extra fit at all."""
         eps = self.cfg.freeze_eps
         newest = len(self._l1) - 1
+        scratch = self._scratch
         for i, (pl, pv) in enumerate(self._l1):
             resid = resid_prev if i == newest else self._affine(pl, luma)[2]
-            if float(np.sqrt((resid**2).mean())) + abs(V - pv) < eps:
+            # sqrt((resid ** 2).mean()): the squares' sum over the count, in float32
+            rms = np.sqrt(np.multiply(resid, resid, out=scratch).sum() / resid.size)
+            if float(rms) + abs(V - pv) < eps:
                 return True
         return False
 
@@ -186,21 +201,24 @@ class StreamAnalyzer:
     # same arrays. `n` is the cell count; a mean is numpy's float32 sum over float32 n.
 
     @staticmethod
-    def _affine_of(prev: _Luma, cur: _Luma, cross):
-        """_affine(prev.map, cur.map) from the statistics; `cross` is (pc * cc).sum()."""
+    def _affine_of(prev: _Luma, cur: _Luma, cross, scratch):
+        """_affine(prev.map, cur.map) from the statistics; `cross` is (pc * cc).sum().
+        The residual cur - (a * prev + b) is built in `scratch` and returned as a new
+        array (it is handed out on the FrameStats)."""
         n = prev.map.size
-        vp = float(np.true_divide(prev.sumsq, n, dtype=np.float32))  # (pc * pc).mean()
+        vp = float(prev.sumsq / n)  # (pc * pc).mean()
         if vp < 1e-6:
             return 1.0, float(cur.mean - prev.mean), cur.map - prev.map
-        # (pc * cc).mean() / vp
-        a = float(np.true_divide(cross, n, dtype=np.float32)) / vp
+        a = float(cross / n) / vp  # (pc * cc).mean() / vp
         b = float(cur.mean - a * prev.mean)
-        return a, b, cur.map - (a * prev.map + b)
+        np.multiply(prev.map, a, out=scratch)
+        np.add(scratch, b, out=scratch)
+        return a, b, np.subtract(cur.map, scratch)
 
     @staticmethod
     def _std_of(x: _Luma) -> float:
         """float(x.map.std()): the root of the mean of the centred squares, in float32."""
-        return float(np.sqrt(np.true_divide(x.sumsq, x.map.size, dtype=np.float32)))
+        return float(np.sqrt(x.sumsq / x.map.size))
 
     def _luma_corr(self, prev: _Luma, cur: _Luma, cross):
         """Motion-compensated luma correlation. Skips the shift search on near-static
@@ -222,13 +240,16 @@ class StreamAnalyzer:
         dissimilarities, each already normalized to ~[0, 1]."""
         c = self.cfg
         luma_corr = self._luma_corr(prev, cur, cross)
-        color = float(np.linalg.norm(prev_color - cur_color)) / (255.0 * c.color_maxd)
+        d = (
+            prev_color - cur_color
+        )  # np.linalg.norm(d): sqrt(d.dot(d)), without its wrapper
+        color = float(np.sqrt(d.dot(d))) / (255.0 * c.color_maxd)
         return max(1.0 - luma_corr, color), luma_corr
 
     def update(self, fs) -> TemporalSignals:
         c = self.cfg
         self._idx += 1
-        luma, color, V = fs.v_cell_mean, fs.color_mean, fs.exposure
+        luma, color, V = fs._cell_mean(S.CH_V), fs.color_mean, fs.exposure
         ovec = fs.struct_grid[:, :, S.SE_OC : S.SE_OS + 1]
 
         if fs.blank:
@@ -236,7 +257,11 @@ class StreamAnalyzer:
             return TemporalSignals.none()
         prev_ovec = self._prev_ovec  # set and cleared together with _prev_luma
         prev = self._prev
-        cur = _Luma(luma)  # its statistics, taken once; carried as `prev` next frame
+        scratch = self._scratch
+        if scratch is None or scratch.shape != luma.shape:
+            scratch = self._scratch = np.empty(luma.shape, np.float32)
+        cur = _Luma(luma, scratch)  # its statistics, once; carried as `prev` next frame
+        luma = cur.map  # contiguous from here on
         if prev is None or prev_ovec is None:
             self._reset()
             self._prev_luma, self._prev_color, self._prev_V = luma, color, V
@@ -246,15 +271,14 @@ class StreamAnalyzer:
             self._idx_prev = self._idx
             return TemporalSignals.none()
 
-        cross = (
-            prev.centred * cur.centred
-        ).sum()  # shared by the fit and the correlation
-        a, b, resid = self._affine_of(prev, cur, cross)  # 2-D, no ravel copies
+        # shared by the fit and the correlation
+        cross = np.multiply(prev.centred, cur.centred, out=scratch).sum()
+        a, b, resid = self._affine_of(prev, cur, cross, scratch)  # 2-D, no ravel copies
         fs.residual = resid  # already (G,G); annotate the frame with its motion vs t-1
-        fs.ori_change = np.hypot(
-            ovec[:, :, 0] - prev_ovec[:, :, 0],
-            ovec[:, :, 1] - prev_ovec[:, :, 1],
-        )
+        fs.prev_ovec = prev_ovec  # ... and with what ori_change needs, if it is read
+        # a duplicate frame comes through here as the same FrameStats again: a value
+        # ori_change cached from before this update is stale
+        fs.__dict__.pop("ori_change", None)
 
         cut_score, luma_corr = self._cut_score(
             prev, self._prev_color, cur, color, cross

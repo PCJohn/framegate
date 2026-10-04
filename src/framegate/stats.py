@@ -29,6 +29,18 @@ _C = 3  # HSV
 _INTERP = {"area": cv2.INTER_AREA, "nearest": cv2.INTER_NEAREST}  # cfg.resize_interp
 
 
+_TMP: dict = {}
+
+
+def _tmp(shape: tuple) -> np.ndarray:
+    """A float32 array of `shape` for a computation's intermediates, kept and reused:
+    the gate runs one frame at a time, and nothing is kept past the computation."""
+    a = _TMP.get(shape)
+    if a is None:
+        a = _TMP[shape] = np.empty(shape, np.float32)
+    return a
+
+
 @dataclass
 class FrameStats:
     """Everything a single frame yields. Raw central moments [mean, var, m3, m4].
@@ -44,6 +56,11 @@ class FrameStats:
     grids: (
         tuple
     ) = ()  # pyramid levels finest->coarsest, each (G_k, G_k, C, 4); grids[0] is grid
+    cell_means: np.ndarray | None = (
+        None  # (C, G, G) == grid[:, :, :, M_MEAN] channel-major: each channel's map of
+    )
+    #   cell means contiguous, for the per-frame readers (the temporal layer); a view of
+    #   grid has a 48-byte column stride, which costs three to four times per operation
     thumb: np.ndarray | None = (
         None  # the input at thumbnail size (BGR or gray), if cfg.return_frames
     )
@@ -51,9 +68,10 @@ class FrameStats:
         None  # (G,G) photometric change vs the previous frame;
     )
     #   set by StreamAnalyzer, None for a standalone image or the first/post-blank frame
-    ori_change: np.ndarray | None = (
-        None  # (G,G) ||d(edge orientation vector)|| vs prev; illumination-invariant
+    prev_ovec: np.ndarray | None = (
+        None  # the previous frame's (G,G,2) edge-orientation vectors, for ori_change;
     )
+    #   set by StreamAnalyzer with residual, None when residual is
     struct: dict | None = (
         None  # imfeat structure maps for V: "grid_0" (cells,cells,5) + "global" (5,)
     )
@@ -93,6 +111,12 @@ class FrameStats:
     @property
     def v_cell_mean(self) -> np.ndarray:
         return self.grid[:, :, S.CH_V, S.M_MEAN]
+
+    def _cell_mean(self, ch: int) -> np.ndarray:
+        """grid[:, :, ch, M_MEAN], contiguous: from cell_means when the gate made it."""
+        if self.cell_means is not None:
+            return self.cell_means[ch]
+        return np.ascontiguousarray(self.grid[:, :, ch, S.M_MEAN])
 
     @property
     def v_cell_var(self) -> np.ndarray:
@@ -191,14 +215,36 @@ class FrameStats:
     @cached_property
     def color_mean(self) -> np.ndarray:
         """Global saturation + saturation-weighted hue vector [S, S*cos2H, S*sin2H],
-        averaged over cells. Unsaturated cells (hue = noise) contribute ~nothing."""
-        sat = self.grid_S[:, :, S.M_MEAN]
-        ang = self.grid_H[:, :, S.M_MEAN] * (
-            np.pi / 90.0
-        )  # OpenCV hue 0..180 -> 0..2pi
-        return np.array(
-            [sat.mean(), (sat * np.cos(ang)).mean(), (sat * np.sin(ang)).mean()],
-            np.float32,
+        averaged over cells. Unsaturated cells (hue = noise) contribute ~nothing.
+
+        The three means are [sat.mean(), (sat * cos(ang)).mean(), (sat * sin(ang)).mean()]
+        with ang = hue * (pi / 90) (OpenCV hue 0..180 -> 0..2pi), from the contiguous
+        planes: the two products are taken in one call into a shared scratch array and
+        summed in one call -- numpy sums each row in the order it sums the array on its
+        own -- and each sum is divided by the count as a mean is; the values are those
+        three means to the bit, for half the calls."""
+        sat, hue = self._cell_mean(S.CH_S), self._cell_mean(S.CH_H)
+        n = sat.size
+        trig = _tmp((2, *sat.shape))
+        ang = hue * (np.pi / 90.0)
+        np.cos(ang, out=trig[0])
+        np.sin(ang, out=trig[1])
+        hv = np.multiply(sat, trig, out=trig).reshape(2, -1).sum(axis=1)
+        return np.array([sat.sum() / n, hv[0] / n, hv[1] / n], np.float32)
+
+    @cached_property
+    def ori_change(self) -> np.ndarray | None:
+        """(G,G) ||d(edge orientation vector)|| vs the previous frame; illumination-
+        invariant (orientation does not change when lighting does). None for a standalone
+        image or the first/post-blank frame. Computed when first read: only `motion`
+        (with motion_struct_w > 0) uses it, so a frame whose motion map nobody reads
+        never pays for it."""
+        if self.prev_ovec is None:
+            return None
+        ovec = self.struct_grid[:, :, S.SE_OC : S.SE_OS + 1]
+        return np.hypot(
+            ovec[:, :, 0] - self.prev_ovec[:, :, 0],
+            ovec[:, :, 1] - self.prev_ovec[:, :, 1],
         )
 
     # --- structure maps (gradient structure-tensor, from imfeat) ---
@@ -406,11 +452,21 @@ class FrameGate:
                 feat = self._feat[size] = self._computer((*size, 3), size)
             bgr, thumb = self._thumbnail(frame, size, keep)
             p = feat.features(bgr)
+        # The learned maps first: they consume the imfeat result, which is not kept (a
+        # FrameStats outlives its frame in the rolling windows, and the result is
+        # megabytes), and a model in the config is a request to run it. First, because
+        # they walk megabytes of level maps and would push the grids below out of the
+        # cache; made after them, the grids are still in cache when the temporal layer
+        # reads their planes a moment later (a 48-byte column stride touches every line
+        # of a grid, so a cold plane costs the whole grid's worth of misses).
+        model_maps = self._models.maps(p, (h, w)) if self._models else {}
+
         chan = p.moments[-1].astype(np.float32)  # the 1-cell global level is last
         grids = tuple(m.astype(np.float32) for m in p.moments[: self.cfg.n_levels])
         grid = grids[
             0
         ]  # finest = output-map resolution; coarser levels feed multi-scale signals
+        cell_means = np.ascontiguousarray(grid[:, :, :, S.M_MEAN].transpose(2, 0, 1))
 
         # Structure-tensor features, from the same pass and the same cells. imfeat
         # computes them for H, S and V; the signals below read V.
@@ -436,15 +492,11 @@ class FrameGate:
             < self.cfg.edge_thresh
         )
 
-        # The learned maps, computed now: they consume the imfeat result, which is not
-        # kept (a FrameStats outlives its frame in the rolling windows, and the result
-        # is megabytes), and a model in the config is a request to run it.
-        model_maps = self._models.maps(p, (h, w)) if self._models else {}
-
         return FrameStats(
             chan=chan,
             grid=grid,
             grids=grids,
+            cell_means=cell_means,
             blank=blank,
             shape=(h, w),
             cfg=self.cfg,

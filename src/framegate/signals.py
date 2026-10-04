@@ -5,10 +5,21 @@ function is independently testable and trivial to port. Channel/moment layout
 constants live here because this is the lowest layer that indexes the grids.
 """
 
+import struct
+
 import cv2
 import imfeat  # type: ignore[import-untyped]  # imfeat needs a py.typed marker
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
+
+_F32 = struct.Struct("f")
+
+
+def f32(x: float) -> float:
+    """x rounded to float32, as a Python float: what storing it in a float32 array and
+    reading it back gives, in a fraction of the time of a numpy scalar."""
+    return _F32.unpack(_F32.pack(x))[0]
+
 
 # imfeat layout: result["mom_global"] is (3, 4) per-channel moments; result["mom_0"]
 # is (G, G, C, 4) = [row, col, channel, moment].
@@ -109,10 +120,12 @@ class ShiftSearch:
         c = cur[s : s + h, s : s + h]
         c = c - c.mean()
         nc = np.sqrt((c * c).sum()) + 1e-6
-        # bands[dx] = prev[:, dx : dx + h], one copy from a (g, n, h) view of the columns
-        np.copyto(
-            self._bands, sliding_window_view(prev, h, axis=1)[:, :n].transpose(1, 0, 2)
-        )
+        # bands[dx] = prev[:, dx : dx + h]: one slice copy per dx (a single copy from a
+        # (n, g, h) view of the columns can have numpy walk dx innermost -- its stride is
+        # the column's -- and scatter 4-byte writes across the bands, ten times slower)
+        bands = self._bands
+        for dx in range(n):
+            bands[dx] = prev[:, dx : dx + h]
         wins = self._wins
         a = np.subtract(wins, wins.mean(axis=(2, 3), keepdims=True), out=self._centred)
         cross = np.multiply(a, c, out=self._prod).sum(axis=(2, 3))
@@ -220,12 +233,31 @@ def text(
     return box(score, line_k, 1)
 
 
-def fade_score(series: np.ndarray, span: float) -> float:
+def fade_score(series, span: float) -> float:
     """Signed fade strength in [-1, 1] over a brightness series: sign = direction
-    (negative = darkening), magnitude = monotonicity * normalized span."""
-    d = np.diff(series)
-    total = float(series[-1] - series[0])
+    (negative = darkening), magnitude = monotonicity * normalized span.
+
+    As first written over a float32 array:
+
+        d = np.diff(series)
+        total = float(series[-1] - series[0])
+        mono = float(np.mean(np.sign(d) == np.sign(total)))
+        return float(np.sign(total) * mono * min(abs(total) / span, 1.0))
+
+    in plain Python over a sequence of float32 values: `total` is the float32 difference
+    (a float32 difference rounded through a double is the same number), and the sign of
+    each step is the sign of the exact difference, which a float32 difference keeps
+    (it is zero only when the two values are equal). The arithmetic on `mono` and
+    `total` is double either way."""
+    n = len(series)
+    total = f32(series[-1] - series[0])
     if total == 0.0:
         return 0.0
-    mono = float(np.mean(np.sign(d) == np.sign(total)))
-    return float(np.sign(total) * mono * min(abs(total) / span, 1.0))
+    if total > 0.0:
+        agree = sum(1 for i in range(1, n) if series[i] > series[i - 1])
+        sign = 1.0
+    else:
+        agree = sum(1 for i in range(1, n) if series[i] < series[i - 1])
+        sign = -1.0
+    mono = agree / (n - 1)
+    return float(sign * mono * min(abs(total) / span, 1.0))
