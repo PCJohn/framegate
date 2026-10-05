@@ -41,6 +41,26 @@ DISPLAY_MAX = 480  # longest side of the displayed frame
 MAP_VMAX = {"motion": 32.0, "saliency": 3.0, "texture": 24.0, "focus": 30.0}
 
 
+def _time_model_stage():
+    """Time every call of the models' map computation inside the gate (the context banks
+    and the scorer, for every model), so the model stage can be compared across thread
+    counts without the rest of the frame in the number. Returns the list the times go
+    to."""
+    from framegate import models as models_module
+
+    times = []
+    original = models_module.ModelBank.maps
+
+    def timed(self, result, shape):
+        t0 = time.perf_counter()
+        out = original(self, result, shape)
+        times.append((time.perf_counter() - t0) * 1e3)
+        return out
+
+    models_module.ModelBank.maps = timed
+    return times
+
+
 def run(src, cfg=None):
     cap = cv2.VideoCapture(src)
     assert cap.isOpened(), f"cannot open {src}"
@@ -53,6 +73,8 @@ def run(src, cfg=None):
     gate = Gate(cfg)
     g = gate.cfg.grid_size
     tracker = ShotTracker(gate.cfg)  # shot_id + shot_group_id
+    # per-frame time of the models' maps, inside the gate
+    model_ms = _time_model_stage()
 
     theme.apply()
     fig = plt.figure(figsize=(17, 9), layout="constrained")
@@ -302,10 +324,17 @@ def run(src, cfg=None):
         window.close()
         plt.ioff()
         if fidx:
+            threads = ", ".join(f"{n}: {t}" for n, t in gate.model_threads.items())
+            models = (
+                f" Model stage median {np.median(model_ms):.2f} ms"
+                f" (scorer threads {threads})."
+                if model_ms
+                else ""
+            )
             print(
                 f"done. {fidx} frames; gate median {np.nanmedian(hist['core']):.2f} ms,"
                 f" with maps {np.nanmedian(hist['maps']):.2f} ms"
-                f" ({gate.cfg.feat_threads} imfeat thread(s))."
+                f" ({gate.cfg.feat_threads} imfeat thread(s)).{models}"
             )
 
 
@@ -331,6 +360,13 @@ def main(argv=None):
         help="a fastdet .fdt model to run on the gate's pass (repeatable); "
         "NAME defaults to text, which replaces the heuristic text map",
     )
+    parser.add_argument(
+        "--model-threads",
+        type=int,
+        default=None,
+        help="threads for the models' scorer, its own pool (default: --threads; "
+        "the map is bit-identical at any count)",
+    )
     args = parser.parse_args(argv)
     overrides = {}
     if args.threads:
@@ -339,6 +375,8 @@ def main(argv=None):
         overrides["models"] = dict(
             m.split("=", 1) if "=" in m else ("text", m) for m in args.model
         )
+    if args.model_threads:
+        overrides["model_threads"] = args.model_threads
     run(args.video, GateConfig(**overrides) if overrides else None)
 
 

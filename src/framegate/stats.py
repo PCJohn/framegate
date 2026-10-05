@@ -513,6 +513,11 @@ class FrameGate:
         """Names of the loaded models (the keys of `FrameStats.model_maps`)."""
         return self._models.names
 
+    @property
+    def model_threads(self) -> dict[str, int]:
+        """Threads each model's scorer runs on (cfg.model_threads, or feat_threads)."""
+        return self._models.threads if self._models else {}
+
     def close(self) -> None:
         """Join the imfeat pools and the models' scorer threads. The gate is unusable
         afterwards. Python does this when the object dies, but do it explicitly before

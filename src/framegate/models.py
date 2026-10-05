@@ -108,13 +108,18 @@ class ModelBank:
         for name, path in paths.items():
             if not path.is_file():
                 raise FileNotFoundError(f"model {name!r}: no file at {path}")
-            det = Detector.load(path, threads=cfg.feat_threads)
+            det = Detector.load(path, threads=cfg.model_threads or cfg.feat_threads)
             check_front_end(name, path, det.front_end_spec, cfg)
             self.detectors[name] = det
 
     @property
     def names(self) -> list[str]:
         return list(self.detectors)
+
+    @property
+    def threads(self) -> dict[str, int]:
+        """Threads each model's scorer actually runs on (its count, clamped by fastdet)."""
+        return {name: int(det.native.threads) for name, det in self.detectors.items()}
 
     def __bool__(self) -> bool:
         return bool(self.detectors)

@@ -358,9 +358,11 @@ adds only its scorer (well under a millisecond on a couple of threads) per frame
   `thumb`, `resize_interp`, `stride` or pyramid, since the features would be silently
   wrong. The maps are computed at extraction, not lazily: a model in the config is a
   request to run it, and the imfeat result it needs is not kept on `FrameStats`.
-- **One pool.** A detector used this way never spawns its own imfeat threads; its
-  scorer uses `feat_threads` threads. `Gate.close()` (and `Publisher.close()`) joins
-  the pools -- call it when a stream ends, and before interpreter shutdown on Windows.
+- **One pass, two pools.** A detector used this way never spawns its own imfeat
+  threads. Its scorer has its own small pool: `model_threads` threads (0, the default,
+  means `feat_threads`); the map is bit-identical at any count, only the time changes
+  (see Performance). `Gate.close()` (and `Publisher.close()`) joins the pools -- call
+  it when a stream ends, and before interpreter shutdown on Windows.
 
 `examples/visualize.py --model text.fdt` shows the model's map in the `text` panel
 (`--model NAME=PATH` for others), and `tests/test_models.py` proves the plumbing: the
@@ -471,7 +473,13 @@ What moves the number:
   pre-downscale.
 - **`feat_threads` is the main parallel lever.** imfeat splits its accumulate pass into
   disjoint bands of cell rows and the output is bit-identical at any thread count. 2 is a
-  reasonable default when other work shares the machine, 4 when it does not.
+  reasonable default when other work shares the machine, 4 when it does not. With a
+  model loaded, `model_threads` sets the fastdet scorer's own pool independently. It is
+  a control, not a lever: on a 22-thread laptop the scorer's pass was fastest on 2
+  threads (0.23 ms) and slower on 8 (0.31) and 16 (0.40), its per-pass synchronisation
+  costing more than the split saves, so the default (`feat_threads`, 2) is the measured
+  best there; `examples/visualize.py --model-threads N` prints the model stage's median
+  so another machine can be checked.
 - **`stride` is the second lever:** the pixel work scales with `1/stride**2` (the
   benchmark's sweep [8] prints the numbers on your machine). It simply subsamples which
   pixels the single accumulation loop visits; the gradient stencil and the cell boundaries

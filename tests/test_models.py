@@ -94,6 +94,22 @@ def test_model_map_matches_fastdet_on_the_same_frame(model_file, frame):
     gate.close()
 
 
+def test_model_threads_reach_the_scorer_and_change_no_bits(model_file, frame):
+    """model_threads is the scorer's own count (0 = feat_threads); the map is the same."""
+    maps = {}
+    for threads in (0, 1, 3):
+        gate = Gate(
+            GateConfig(
+                models={"text": str(model_file)}, feat_threads=2, model_threads=threads
+            )
+        )
+        assert gate.model_threads == {"text": threads or 2}
+        maps[threads] = gate.image(frame).text
+        gate.close()
+    np.testing.assert_array_equal(maps[0], maps[1])
+    np.testing.assert_array_equal(maps[0], maps[3])
+
+
 def test_video_frames_and_duplicates(model_file, frame):
     gate = Gate(GateConfig(models={"text": str(model_file)}))
     fs1, _ = gate.frame(frame)

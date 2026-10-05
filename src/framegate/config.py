@@ -137,6 +137,10 @@ class GateConfig:
     # heuristic text map. fastdet is optional: without it, bundled models are skipped.
     models_dir: str = "models"
     models: dict = field(default_factory=dict)
+    # Threads the fastdet scorer uses per frame (its own pool, apart from imfeat's); 0 =
+    # feat_threads. The map is bit-identical at any count; only the time changes, and
+    # the scorer splits its work by tiles, so it scales where imfeat's pass has stopped.
+    model_threads: int = 0
 
     # --- output ---
     # attach the thumbnail to FrameStats for caller reuse (its HSV, made on demand)

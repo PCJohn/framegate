@@ -126,6 +126,11 @@ class Gate:
         `FrameStats.model_maps`."""
         return self._gate.models
 
+    @property
+    def model_threads(self) -> dict[str, int]:
+        """Threads each model's scorer runs on (`model_threads`, or `feat_threads`)."""
+        return self._gate.model_threads
+
     def close(self) -> None:
         """Release the imfeat pool and the models (their threads are joined). Call it
         when a stream ends in a long-running host, and before exit on Windows."""
