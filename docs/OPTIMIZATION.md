@@ -25,9 +25,9 @@ means. What was there from the start and is still the design: a stateless per-fr
 producing lazy maps, a stateless-per-call temporal layer over a rolling window, buffers
 preallocated and reused, float32 throughout, the robust baseline sorted rather than
 `np.median`'d, and a benchmark that interleaves configurations so clock drift is spread
-evenly. The README of the time recorded a frame at `thumb=256` costing about 0.8 ms, with
-the pyramid depth nearly free (`n_levels` 1 → 4: 0.79 → 0.83 ms) and the grid cheap up to
-32×32 (16×16 0.92, 32×32 0.94, 64×64 1.45 ms).
+evenly. The READMEs of June to August recorded a frame at `thumb=256` costing about 0.8 ms,
+with the pyramid depth nearly free (`n_levels` 1 → 4: 0.79 → 0.83 ms) and the grid cheap up
+to 32×32 (16×16 0.92, 32×32 0.94, 64×64 1.45 ms).
 
 What it did not yet have: one pass for everything, threads, a thumbnail that follows the
 frame, the resize and the colour conversion inside the pass, a learned map, or a temporal
@@ -49,11 +49,13 @@ layer that reuses what it already computed.
 
 ## Result
 
-A gate frame on the laptop at the operating point (`gate_loop.py`, medians over 100–600
-frames, GC disabled): **2.14 ms** (p90 2.38; the minimum of 0.25 is a held frame the
-duplicate check settles), of which the model stage is 0.22 ms and the imfeat pass about
-1.8 ms; on an earlier clip and model 2.9 ms with a 0.37 ms model stage. Through `examples/visualize.py`, which draws between frames, the
-gate median reads 4.83 ms and 5.36 with every map read.
+A gate frame on the laptop at the operating point (`examples/gate_loop.py`, medians over
+100–600 frames, GC disabled): **2.14 ms** (p90 2.38; the minimum of 0.25 is a held frame
+the duplicate check settles), of which the model stage is 0.22 ms and the imfeat pass about
+1.8 ms; on an earlier clip and model 2.9 ms with a 0.37 ms model stage. Through
+`examples/visualize.py`, which draws between frames, the gate median reads 4.9 ms and 5.4
+with every map read, the model stage 0.6 ms (2037 frames; 4.83 / 5.36 / 0.58 on 561 frames
+of an earlier run).
 
 For scale, the same pass on the laptop as recorded in the README: a 1080p frame to HSV
 features at 1024×576 costs 7.5 / 4.0 / 2.4 ms on 1 / 2 / 4 threads (10.8 / 5.7 / 3.2 at the
@@ -104,7 +106,7 @@ README recorded at the time.
 | 9 | The stream update: the previous frame's luma statistics carried, ring buffers instead of deques, the shift search's working arrays kept (a view of column bands so numpy sums each window in the order it sums a copy), the colour vector's trigonometry in one scratch, `ori_change` lazy | the same bits (`test_stream_exact.py`); `update()` per frame −33% to −47% on four clips on the VM, −52% on a film clip on the laptop |
 | 10 | The flicker signal removed | one `rfft` of the brightness history per frame, for a signal nothing consumed |
 | 11 | The temporal layer measured live rather than warm: the cell-mean planes made contiguous once in `process()`, `ori_change` computed only when `motion` reads it, the trigonometry and products into kept scratch, fewer numpy calls; the model stage moved before the grid work | VM, live per frame (the lazy inputs plus `update()`): frames without the motion search 243 / 234 / 218 → 121 / 124 / 134 µs on three clips, frames with it 624 / 725 / 588 → 473 / 514 / 448 µs; the grids are still in cache when the temporal layer reads them |
-| 12 | A separate thread count for the scorer (`model_threads`) | 2 threads 0.23 ms, 8 threads 0.31, 16 threads 0.40: the default (`feat_threads`, 2) is the measured best; a control, not a lever |
+| 12 | A separate thread count for the scorer (`model_threads`) | 2 threads 0.23 ms, 8 threads 0.31, 16 threads 0.40 for the scorer's pass (the laptop, 5 October; recorded in the *model_threads* commit's message): the default (`feat_threads`, 2) is the measured best; a control, not a lever |
 
 **Step 7, the front end in imfeat.** The gate used to resize with `cv2.resize` and convert
 with `cv2.cvtColor` before the pass: two full passes over the frame, each writing an image
@@ -157,9 +159,9 @@ scratch and are summed in one call.
   extension; it was not moved there either, by the rule that imfeat stays a single-image
   library.
 * **The resize by periods** (imfeat side; built, measured, reverted by the maintainer):
-  imfeat's log has the numbers. At the gate's operating point the resize inside the pass is
-  about 0.32 ms on two threads, so the saving there would have been a few tenths of a
-  millisecond.
+  imfeat's log has the numbers. At the gate's operating point the resize inside a two-thread
+  pass measured 0.32 ms on the laptop with that kernel, so the saving over the window kernel
+  that stayed was a few tenths of a millisecond at most.
 * **Lazy conversion of the coarse grid levels.** The float64 → float32 cast of every level's
   moments costs about 20 µs on the VM; making the coarse levels lazy was measured and not
   done, for the complexity of the laziness against the size of the gain. The casts are set by
@@ -199,11 +201,11 @@ scratch and are summed in one call.
 
 ## Measuring
 
-* **`python gate_loop.py clip.mp4 --model text.fdt --threads 2 --model-threads 2
-  --frames N`** (delivered alongside the patches): `gate.frame()` per frame, the model stage
-  and `score_maps` timed by monkey-patching, medians and p90, GC disabled. The number of
-  record.
-* **`python gate_stages.py clip.mp4 --threads 2 --model text.fdt`**: where a gate frame
+* **`python examples/gate_loop.py clip.mp4 --model text.fdt --threads 2 --model-threads 2
+  --frames N`**: `gate.frame()` per frame, the model stage and `score_maps` timed by
+  monkey-patching, medians and p90, GC disabled; `--pyspy out.json` attaches py-spy once the
+  gate is warm. The number of record.
+* **`python examples/gate_stages.py clip.mp4 --threads 2 --model text.fdt`**: where a gate frame
   goes stage by stage — the pass (frame in, thumbnail made inside), the model stage, the rest
   of `process()`, the temporal layer — and the pass on a ready thumbnail alongside, which
   isolates the in-pass resize. Frames the gate skips as duplicates are left out of the

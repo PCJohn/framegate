@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 
 import cv2
-import imfeat  # type: ignore[import-untyped]  # imfeat needs a py.typed marker
+import imfeat
 import numpy as np
 
 from . import signals as S

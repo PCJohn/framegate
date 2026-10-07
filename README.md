@@ -584,6 +584,8 @@ framegate/
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
 │   ├── shots.py           # live shot re-ID viewer: groups build up as the video plays
 │   ├── benchmark.py       # latency measurement
+│   ├── gate_loop.py       # gate.frame() on a video, no drawing: the per-frame medians, a py-spy hook
+│   ├── gate_stages.py     # where a gate frame goes: pass, model stage, the rest, temporal layer
 │   └── publish.py         # Publisher demo: drops frames, prints shot_id + shot_group_id
 └── tests/
     ├── synth.py           # synthetic scene + pattern builders
@@ -608,6 +610,8 @@ no matplotlib or benchmarking code.
 ```bash
 python examples/visualize.py path/to/video.mp4     # needs [viz]; --threads N sets imfeat's pool
 python examples/benchmark.py                        # synthetic, or pass a video path
+python examples/gate_loop.py video.mp4 --model m.fdt # the gate's per-frame medians (model stage too); --pyspy out.json
+python examples/gate_stages.py video.mp4            # a frame stage by stage; --model m.fdt adds the model stage
 python examples/publish.py                          # publishing gate (synthetic, or pass a video)
 python examples/shots.py                            # live shot re-ID viewer (synthetic, or pass a video); --threads N
 pytest                                              # needs [dev]; -s prints latencies

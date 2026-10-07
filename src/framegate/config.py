@@ -15,7 +15,7 @@ uses the defaults, and ``to_yaml()`` generates a template from the live fields o
 
 from dataclasses import MISSING, dataclass, field, fields, replace
 
-import imfeat  # type: ignore[import-untyped]  # imfeat needs a py.typed marker
+import imfeat
 import yaml
 
 RESIZE_INTERP = ("area", "nearest")  # thumbnail filters FrameGate knows

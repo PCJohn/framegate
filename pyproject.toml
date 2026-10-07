@@ -55,6 +55,7 @@ warn_unused_ignores = true
 warn_redundant_casts = true
 
 [[tool.mypy.overrides]]
-# fastdet is optional (models.py); when it is not installed its import is skipped
-module = ["fastdet", "fastdet.*"]
+# fastdet is optional (models.py); when it is not installed its import is skipped. imfeat
+# ships a py.typed marker from its lint-pass commit on; an older build is taken as untyped.
+module = ["fastdet", "fastdet.*", "imfeat", "imfeat.*"]
 ignore_missing_imports = true

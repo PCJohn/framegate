@@ -163,7 +163,7 @@ def test_pass_on_bgr_equals_pass_on_cvtcolor_hsv():
     reads is byte for byte what a pass on the cvtColor'd thumbnail gives, so signals and
     models behave exactly as before the conversion moved. A grayscale frame likewise
     (H = S = 0, V = luma)."""
-    import imfeat  # type: ignore[import-untyped]
+    import imfeat
 
     from framegate import signals as S
 

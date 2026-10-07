@@ -8,7 +8,7 @@ constants live here because this is the lowest layer that indexes the grids.
 import struct
 
 import cv2
-import imfeat  # type: ignore[import-untyped]  # imfeat needs a py.typed marker
+import imfeat
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 
