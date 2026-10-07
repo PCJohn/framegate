@@ -479,13 +479,13 @@ What moves the number:
   disjoint bands of cell rows and the output is bit-identical at any thread count. 2 is a
   reasonable default when other work shares the machine, 4 when it does not. With a
   model loaded, `model_threads` sets the fastdet scorer's own pool independently. It is
-  a control, not a lever, and the best count follows the length of the scorer's pass: on
-  a 22-thread laptop the text model's 0.2 ms pass was fastest on 2 threads (0.23 ms) and
-  slower on 8 (0.31) and 16 (0.40), its per-pass synchronisation costing more than the
-  split saved, while a heavier model's 0.4 ms pass read 0.39 ms on 8 threads and 0.47 on
-  16. The default (`feat_threads`, 2) suits small models; `examples/gate_loop.py
-  --model-threads N` (or `examples/visualize.py --model-threads N`) prints the model
-  stage's median so the count can be checked with the model and machine in hand.
+  a control, not a lever: on a 22-thread laptop the text model's 0.2 ms pass was fastest
+  on 2 threads (0.23 ms) and slower on 8 (0.31) and 16 (0.40), its per-pass
+  synchronisation costing more than the split saved, and a heavier model's 0.33 ms pass
+  read 0.37 ms on 2 threads, 0.35–0.41 on 8 and 0.47 on 16 — within noise between 2 and
+  8, worse at 16. The default (`feat_threads`, 2) is the measured best there;
+  `examples/gate_loop.py --model-threads N` (or `examples/visualize.py --model-threads N`)
+  prints the model stage's median so another model or machine can be checked.
 - **`stride` is the second lever:** the pixel work scales with `1/stride**2` (the
   benchmark's sweep [8] prints the numbers on your machine). It simply subsamples which
   pixels the single accumulation loop visits; the gradient stencil and the cell boundaries
