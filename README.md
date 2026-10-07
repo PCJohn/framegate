@@ -438,6 +438,10 @@ inert on high-motion frames; set `fast_static=False` for strict bit-exactness.
 
 ## Performance
 
+[docs/OPTIMIZATION.md](docs/OPTIMIZATION.md) is the engineering log behind these numbers:
+every step that made a frame cheaper, what was tried and dropped, how it is measured, and
+the settings to run with.
+
 Per-frame latency at 1080p (min over repeats, GC disabled, one frame at a time) with the
 **default config** as it stood at the 1024 px square (`thumb=1024`, box-filtered),
 `grid_exp=6` (a 64x64 finest grid), a 6-level pyramid, `stride=1`, `feat_threads=2`; the
@@ -573,7 +577,8 @@ framegate/
 │   ├── models.py          # learned maps: fastdet models scored on the gate's pass
 │   └── models/            # bundled <name>.fdt models (text.fdt replaces the heuristic text map)
 ├── docs/
-│   └── shot-reid.md       # re-ID decision rule, constants, known limitations
+│   ├── shot-reid.md       # re-ID decision rule, constants, known limitations
+│   └── OPTIMIZATION.md    # the latency engineering log: what worked, what did not, settings
 ├── examples/
 │   ├── theme.py           # the viewers' shared dark theme, panels and window keys
 │   ├── visualize.py       # live matplotlib dashboard (frame + maps + signals + shot/group)
@@ -591,6 +596,7 @@ framegate/
     ├── test_reid.py       # Bernoulli model + Background: exactness, loose-match, latency
     ├── test_shotmem.py    # ShotMemory + ShotTracker: group ids, recall+score, metadata, ABAB
     ├── test_stream_exact.py # StreamAnalyzer == its reference implementation, bit for bit
+    ├── test_dupgate.py    # the duplicate detector == np.array_equal, whatever the state
     └── test_models.py     # learned maps == fastdet's own prediction; lookup, overrides, refusals
 ```
 
