@@ -52,10 +52,12 @@ layer that reuses what it already computed.
 A gate frame on the laptop at the operating point (`examples/gate_loop.py`, medians over
 100–600 frames, GC disabled): **2.14 ms** (p90 2.38; the minimum of 0.25 is a held frame
 the duplicate check settles), of which the model stage is 0.22 ms and the imfeat pass about
-1.8 ms; on an earlier clip and model 2.9 ms with a 0.37 ms model stage. Through
-`examples/visualize.py`, which draws between frames, the gate median reads 4.9 ms and 5.4
-with every map read, the model stage 0.6 ms (2037 frames; 4.83 / 5.36 / 0.58 on 561 frames
-of an earlier run).
+1.8 ms; on an earlier clip and model 2.9 ms with a 0.37 ms model stage. On the mainline
+as pushed on 7 October, the earlier clip with the tuning sweep's model `de716422c0b5` and
+the scorer on 8 threads: 2.66 ms (p90 3.72), the model stage 0.39 ms, the lazy maps the
+dashboard reads 0.31 ms more. Through `examples/visualize.py`, which draws between frames,
+the gate median reads 4.9 ms and 5.4 with every map read, the model stage 0.6 ms (2037
+frames; 4.83 / 5.36 / 0.58 on 561 frames of an earlier run).
 
 For scale, the same pass on the laptop as recorded in the README: a 1080p frame to HSV
 features at 1024×576 costs 7.5 / 4.0 / 2.4 ms on 1 / 2 / 4 threads (10.8 / 5.7 / 3.2 at the
@@ -106,7 +108,7 @@ README recorded at the time.
 | 9 | The stream update: the previous frame's luma statistics carried, ring buffers instead of deques, the shift search's working arrays kept (a view of column bands so numpy sums each window in the order it sums a copy), the colour vector's trigonometry in one scratch, `ori_change` lazy | the same bits (`test_stream_exact.py`); `update()` per frame −33% to −47% on four clips on the VM, −52% on a film clip on the laptop |
 | 10 | The flicker signal removed | one `rfft` of the brightness history per frame, for a signal nothing consumed |
 | 11 | The temporal layer measured live rather than warm: the cell-mean planes made contiguous once in `process()`, `ori_change` computed only when `motion` reads it, the trigonometry and products into kept scratch, fewer numpy calls; the model stage moved before the grid work | VM, live per frame (the lazy inputs plus `update()`): frames without the motion search 243 / 234 / 218 → 121 / 124 / 134 µs on three clips, frames with it 624 / 725 / 588 → 473 / 514 / 448 µs; the grids are still in cache when the temporal layer reads them |
-| 12 | A separate thread count for the scorer (`model_threads`) | 2 threads 0.23 ms, 8 threads 0.31, 16 threads 0.40 for the scorer's pass (the laptop, 5 October; recorded in the *model_threads* commit's message): the default (`feat_threads`, 2) is the measured best; a control, not a lever |
+| 12 | A separate thread count for the scorer (`model_threads`) | the text model (a 0.2 ms pass): 2 threads 0.23 ms, 8 threads 0.31, 16 threads 0.40 for the scorer's pass (the laptop, 5 October; recorded in the *model_threads* commit's message) — a control, not a lever. The tuning sweep's model `de716422c0b5` (a 0.35–0.5 ms pass) on the pushed mainline, 7 October: 8 threads 0.39 ms, 16 threads 0.47, and 2 threads 0.54 in a run whose whole frame read 1.5 ms slower than the other two (4.20 against 2.66 and 2.86 ms gate frame, lazy maps 0.42 against 0.31), so that point is unsettled; the best count follows the length of the pass |
 
 **Step 7, the front end in imfeat.** The gate used to resize with `cv2.resize` and convert
 with `cv2.cvtColor` before the pass: two full passes over the frame, each writing an image
@@ -195,9 +197,10 @@ scratch and are summed in one call.
 7. **Prove losslessness by construction.** `np.array_equal` as the duplicate predicate, the
    original formulas for the stream, the OpenCV bytes for the front end — each optimisation
    comes with a test that pins it to what it replaced.
-8. **A thread count is a control.** The scorer is fastest on two threads on the laptop; a
-   wider split costs more in synchronisation than it saves. imfeat's threads are the lever,
-   up to four.
+8. **A thread count is a control.** For the 0.2 ms text model the scorer was fastest on
+   two threads on the laptop, a wider split costing more in synchronisation than it saved;
+   a 0.4 ms model read 0.08 ms better on eight than on sixteen. The count is measured with
+   the model in hand. imfeat's threads are the lever, up to four.
 
 ## Measuring
 
@@ -242,8 +245,9 @@ scratch and are summed in one call.
   consume. `GateConfig(stride=4, resize_interp="nearest")` keeps the grid at a sixteenth of
   the samples; `GateConfig(thumb=256, stride=2, grid_exp=5, n_levels=4)` is the old 256 px
   point.
-* **Threads:** `feat_threads=2` when the machine is shared, 4 when it is not; leave
-  `model_threads` alone.
+* **Threads:** `feat_threads=2` when the machine is shared, 4 when it is not;
+  `model_threads` measured with the model in hand (`examples/gate_loop.py --model-threads
+  N`): 2 for the text model, 8 for the tuning sweep's heavier one, 16 worse than 8 for both.
 * **`return_frames=False`** if `fs.thumb` / `fs.hsv` are never read: it is the one
   allocation per frame (3 MB at 1024 px).
 * **Read signals lazily**: a consumer that needs only the cut decision should not touch the
